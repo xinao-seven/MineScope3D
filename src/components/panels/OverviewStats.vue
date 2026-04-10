@@ -26,3 +26,31 @@ defineProps<{
     </article>
   </div>
 </template>
+
+<style scoped>
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px;
+}
+
+.stat-tile {
+  min-height: 58px;
+  padding: 9px;
+  border: 1px solid rgba(125, 211, 252, 0.2);
+  border-radius: 8px;
+  background: rgba(6, 20, 48, 0.48);
+}
+
+.stat-tile span {
+  color: var(--muted);
+}
+
+.stat-tile strong {
+  display: block;
+  margin-top: 3px;
+  color: var(--amber);
+  font-size: 24px;
+  line-height: 1;
+}
+</style>

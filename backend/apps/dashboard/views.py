@@ -5,17 +5,17 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from apps.boreholes.models import Borehole, BoreholeLayer
 from apps.boundaries.models import BoundaryRegion
-from apps.rasters.models import RasterLayer
+from apps.rasters.services import get_raster_list
 
 
 class DashboardOverviewView(APIView):
     def get(self, request):
-        """返回基于数据库的总览统计。"""
+        """返回总览统计（TIFF 统计基于本地文件扫描）。"""
         return Response({
             'boreholeTotal': Borehole.objects.count(),
             'workfaceTotal': Borehole.objects.exclude(workface_name='').values('workface_name').distinct().count(),
             'boundaryTotal': BoundaryRegion.objects.count(),
-            'rasterTotal': RasterLayer.objects.count(),
+            'rasterTotal': len(get_raster_list()),
         })
 
 

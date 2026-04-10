@@ -109,3 +109,136 @@ function isVisibleLayer(layerThickness: number): boolean {
     <p v-else class="empty-text">点击地图对象后查看属性、分层与图例信息。</p>
   </div>
 </template>
+
+<style scoped>
+.detail-hero {
+  padding: 10px;
+  border: 1px solid rgba(125, 211, 252, 0.24);
+  border-radius: 8px;
+  background: var(--panel-strong);
+}
+
+.detail-hero span,
+.detail-hero p,
+.detail-copy,
+.empty-text {
+  color: var(--muted);
+}
+
+.detail-hero h3 {
+  margin: 4px 0;
+  color: #f5fbff;
+  font-size: 17px;
+}
+
+.detail-hero p,
+.detail-copy,
+.empty-text {
+  margin: 0;
+}
+
+.detail-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px;
+  margin: 8px 0;
+}
+
+.detail-grid div {
+  padding: 8px;
+  border: 1px solid rgba(125, 211, 252, 0.18);
+  border-radius: 8px;
+  background: rgba(6, 20, 48, 0.5);
+}
+
+.detail-grid dt,
+.detail-grid dd {
+  margin: 0;
+}
+
+.detail-grid dt {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.detail-grid dd {
+  margin-top: 4px;
+  color: var(--amber);
+  font-weight: 700;
+}
+
+.strata-view {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr);
+  gap: 9px;
+  min-height: 220px;
+}
+
+.strata-view__bar {
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  min-height: 220px;
+  border: 1px solid rgba(96, 165, 250, 0.32);
+  border-radius: 8px;
+  background: rgba(3, 13, 32, 0.76);
+}
+
+.strata-view__bar span {
+  display: block;
+  flex: 0 0 auto;
+  min-height: 1px;
+}
+
+.strata-view__bar span.is-zero {
+  min-height: 2px;
+  opacity: 0.36;
+}
+
+.strata-view__table,
+.property-list {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.strata-view__table {
+  overflow: auto;
+  max-height: 220px;
+}
+
+.strata-view__table div,
+.property-list div {
+  border: 1px solid rgba(125, 211, 252, 0.18);
+  border-radius: 8px;
+  background: rgba(5, 18, 42, 0.46);
+  min-height: 34px;
+  padding: 7px 9px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.strata-view__table div {
+  align-items: flex-start;
+  padding: 7px 8px;
+}
+
+.strata-view__table strong,
+.property-list strong {
+  color: #f5fbff;
+}
+
+.strata-view__table span,
+.strata-view__table em,
+.property-list span {
+  color: var(--muted);
+  font-size: 12px;
+  font-style: normal;
+}
+
+.empty-text {
+  padding: 12px;
+}
+</style>

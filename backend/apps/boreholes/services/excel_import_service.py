@@ -5,6 +5,7 @@ from typing import Any
 
 import openpyxl
 from django.conf import settings
+from django.contrib.gis.db.models.functions import Distance
 from django.contrib.gis.geos import Point
 from django.db import transaction
 from pyproj import CRS, Transformer
@@ -39,6 +40,7 @@ BOREHOLE_DIR = DATA_DIR / 'boreholes'
 LOCATION_DIR = DATA_DIR / 'location'
 MINE_PRJ_FILE = DATA_DIR / 'shp' / '锦界矿边界.prj'
 DEFAULT_SOURCE_CRS = 'EPSG:2421'
+DEFAULT_WORKFACE_NAME = '本地钻孔数据'
 
 
 @dataclass
@@ -235,10 +237,38 @@ def build_borehole_item(name: str, layers: list[dict[str, Any]], location: Boreh
         'latitude': round(lat, 8),
         'elevation': round(elevation, 3),
         'depth_total': max((layer['bottom_depth'] for layer in sorted_layers), default=0),
-        'workface_name': '本地钻孔数据',
+        'workface_name': DEFAULT_WORKFACE_NAME,
         'remark': '由 backend/data/boreholes 与 backend/data/location 导入 PostGIS',
         'layers': sorted_layers,
     }
+
+
+def resolve_workface_name(geom: Point | None, fallback: str = DEFAULT_WORKFACE_NAME) -> str:
+    """按钻孔空间位置匹配工作面名称。"""
+    if geom is None:
+        return fallback
+
+    from apps.boundaries.models import BoundaryRegion
+
+    matched_name = (
+        BoundaryRegion.objects
+        .filter(type=BoundaryRegion.TYPE_WORKFACE, geom__contains=geom)
+        .order_by('name')
+        .values_list('name', flat=True)
+        .first()
+    )
+    if matched_name:
+        return matched_name
+
+    nearest_name = (
+        BoundaryRegion.objects
+        .filter(type=BoundaryRegion.TYPE_WORKFACE, geom__isnull=False)
+        .annotate(distance=Distance('geom', geom))
+        .order_by('distance', 'name')
+        .values_list('name', flat=True)
+        .first()
+    )
+    return nearest_name or fallback
 
 
 def parse_boreholes_from_files() -> list[dict[str, Any]]:
@@ -264,6 +294,7 @@ def import_boreholes_from_excel(remove_missing: bool = True) -> dict[str, int]:
         longitude = item['longitude']
         latitude = item['latitude']
         geom = Point(longitude, latitude, srid=4326) if not (longitude == 0 and latitude == 0) else None
+        workface_name = resolve_workface_name(geom, item['workface_name'])
         borehole, _ = Borehole.objects.update_or_create(
             borehole_code=item['borehole_code'],
             defaults={
@@ -272,7 +303,7 @@ def import_boreholes_from_excel(remove_missing: bool = True) -> dict[str, int]:
                 'latitude': latitude,
                 'elevation': item['elevation'],
                 'depth_total': item['depth_total'],
-                'workface_name': item['workface_name'],
+                'workface_name': workface_name,
                 'remark': item['remark'],
                 'geom': geom,
             },
@@ -299,6 +330,26 @@ def import_boreholes_from_excel(remove_missing: bool = True) -> dict[str, int]:
         Borehole.objects.exclude(borehole_code__in=seen_codes).delete()
 
     return {'boreholes': len(parsed), 'layers': total_layers}
+
+
+@transaction.atomic
+def sync_borehole_workface_names() -> dict[str, int]:
+    """根据工作面边界回填钻孔 workface_name。"""
+    changed: list[Borehole] = []
+    total = 0
+
+    for borehole in Borehole.objects.exclude(geom__isnull=True).all():
+        total += 1
+        fallback_name = borehole.workface_name or DEFAULT_WORKFACE_NAME
+        matched_name = resolve_workface_name(borehole.geom, fallback_name)
+        if matched_name != borehole.workface_name:
+            borehole.workface_name = matched_name
+            changed.append(borehole)
+
+    if changed:
+        Borehole.objects.bulk_update(changed, ['workface_name'])
+
+    return {'checked': total, 'updated': len(changed)}
 
 
 def serialize_queryset(queryset) -> list[dict[str, Any]]:

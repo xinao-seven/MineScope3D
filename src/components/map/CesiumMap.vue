@@ -1,47 +1,56 @@
 <script setup lang="ts">
 import {
     Cartesian2,
-    Cartesian3,
     Color,
-    ColorMaterialProperty,
-    ConstantProperty,
     Entity,
-    HeightReference,
     ImageryLayer,
     JulianDate,
-    LabelStyle,
-    OpenStreetMapImageryProvider,
-    PolygonHierarchy,
+    PropertyBag,
     Rectangle,
-    ScreenSpaceEventHandler,
-    ScreenSpaceEventType,
-    SingleTileImageryProvider,
-    UrlTemplateImageryProvider,
-    VerticalOrigin,
     Viewer,
     defined,
 } from 'cesium'
 import { onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { CameraManager } from '../../cesium/core/CameraManager'
+import { degreesArrayToCartesianArray } from '../../cesium/core/coordinateTransform'
+import { ViewerManager } from '../../cesium/core/ViewerManager'
+import type { BasemapKey } from '../../cesium/constants'
+import { EntityManager } from '../../cesium/managers/EntityManager'
+import { InteractionManager } from '../../cesium/managers/InteractionManager'
+import { LayerManager } from '../../cesium/managers/LayerManager'
+import { ImageryLayerLoader } from '../../cesium/loaders/ImageryLayerLoader'
+import { MeasureTool } from '../../cesium/tools/MeasureTool'
 import { useDashboardStore } from '../../store/dashboard'
 import type { Borehole, BoundaryRegion, LayerKey, RasterLayer } from '../../types/dashboard'
 
 const store = useDashboardStore()
 const mapContainer = ref<HTMLDivElement | null>(null)
 const tooltip = reactive({ visible: false, x: 0, y: 0, text: '' })
-const activeBasemapKey = ref('geo')
+const activeBasemapKey = ref<BasemapKey>('geo')
+const mapToolState = reactive({
+    measuring: false,
+    measureResult: '',
+    showLayerModel: true,
+})
 
 const basemapOptions = [
-    { key: 'geo', name: '地理' },
-    { key: 'image', name: '影像' },
-    { key: 'osm', name: '街图' },
+    { key: 'geo' as BasemapKey, name: '地理' },
+    { key: 'image' as BasemapKey, name: '影像' },
+    { key: 'osm' as BasemapKey, name: '街图' },
 ]
 
 let viewer: Viewer | null = null
-let clickHandler: ScreenSpaceEventHandler | null = null
-let hoverHandler: ScreenSpaceEventHandler | null = null
+let viewerManager: ViewerManager | null = null
+let cameraManager: CameraManager | null = null
+let entityManager: EntityManager | null = null
+let interactionManager: InteractionManager | null = null
+let layerManager: LayerManager | null = null
+let imageryLayerLoader: ImageryLayerLoader | null = null
+let measureTool: MeasureTool | null = null
 let rasterLayer: ImageryLayer | null = null
 let hasAutoFlownToMine = false
 const boreholeEntities = new Map<string, Entity>()
+const boreholeLayerEntities = new Map<string, Entity[]>()
 const boundaryEntities = new Map<string, Entity[]>()
 
 /** 挂载 Cesium 场景并加载首屏数据。 */
@@ -50,48 +59,27 @@ function mountScene() {
         return
     }
 
-    viewer = new Viewer(mapContainer.value, {
-        animation: false,
-        timeline: false,
-        geocoder: false,
-        homeButton: false,
-        navigationHelpButton: false,
-        sceneModePicker: false,
-        baseLayerPicker: true,
-        fullscreenButton: false,
-        infoBox: false,
-        selectionIndicator: false,
-    })
+    viewerManager = new ViewerManager(mapContainer.value)
+    viewer = viewerManager.viewer
+    cameraManager = new CameraManager(viewer)
+    entityManager = new EntityManager(viewer)
+    interactionManager = new InteractionManager(viewer)
+    layerManager = new LayerManager(viewer)
+    imageryLayerLoader = new ImageryLayerLoader(viewer)
+    measureTool = new MeasureTool(viewer)
 
-    configureScene()
     switchBasemap('geo')
     bindMapInteractions()
     reloadSceneData()
 }
 
-/** 配置深色大屏需要的场景基础效果。 */
-function configureScene() {
-    if (!viewer) {
-        return
-    }
-    viewer.scene.backgroundColor = Color.fromCssColorString('#020716')
-    viewer.scene.globe.baseColor = Color.fromCssColorString('#071933')
-    viewer.scene.globe.depthTestAgainstTerrain = false
-    viewer.scene.fog.enabled = true
-    viewer.scene.fog.density = 0.00045
-    viewer.cesiumWidget.creditContainer.setAttribute('style', 'display:none')
-}
-
 /** 绑定地图点击和 hover 交互。 */
 function bindMapInteractions() {
-    if (!viewer) {
+    if (!interactionManager) {
         return
     }
-
-    clickHandler = new ScreenSpaceEventHandler(viewer.scene.canvas)
-    hoverHandler = new ScreenSpaceEventHandler(viewer.scene.canvas)
-    clickHandler.setInputAction(handleMapClick, ScreenSpaceEventType.LEFT_CLICK)
-    hoverHandler.setInputAction(handleMouseMove, ScreenSpaceEventType.MOUSE_MOVE)
+    interactionManager.onLeftClick(handleMapClick)
+    interactionManager.onMouseMove(handleMouseMove)
 }
 
 /** 读取图层监听签名。 */
@@ -106,19 +94,72 @@ function readDataSignature() {
 
 /** 重新绘制全部业务图层。 */
 function reloadSceneData() {
-    if (!viewer) {
+    if (!viewer || !viewerManager) {
         return
     }
 
-    viewer.entities.removeAll()
+    viewerManager.clearData()
     boreholeEntities.clear()
+    boreholeLayerEntities.clear()
     boundaryEntities.clear()
     removeRasterLayer()
     addBoreholes(store.boreholes)
+    addBoreholeLayerModels(store.boreholes)
     addBoundaries(store.boundaries)
-    void addRasterLayer(store.activeRaster)
+    addRasterLayer(store.activeRaster)
     syncLayerVisibility()
     flyToMineOnce()
+}
+
+/** 添加基于分层信息的钻孔三维实体。 */
+function addBoreholeLayerModels(boreholes: Borehole[]) {
+    if (!entityManager) {
+        return
+    }
+
+    const verticalExaggeration = 4.5
+    const minimumVisualLength = 10
+    const visualRadius = 5.2
+
+    for (const borehole of boreholes) {
+        if (borehole.longitude === 0 && borehole.latitude === 0 || borehole.layers.length === 0) {
+            continue
+        }
+
+        const layerEntities: Entity[] = []
+        const layers = [...borehole.layers].sort((left, right) => left.sort_order - right.sort_order)
+        for (const layer of layers) {
+            const thickness = Math.max(layer.thickness, 0)
+            if (thickness <= 0) {
+                continue
+            }
+
+            const centerHeight = borehole.elevation - (layer.top_depth + thickness / 2) * verticalExaggeration
+            const layerColor = Color.fromCssColorString(layer.color || '#23d18b')
+            const entity = entityManager.addCylinder({
+                id: `borehole-layer-${borehole.id}-${layer.sort_order}`,
+                name: `${borehole.name}-${layer.layer_name}`,
+                position: { lon: borehole.longitude, lat: borehole.latitude, height: centerHeight },
+                length: Math.max(thickness * verticalExaggeration, minimumVisualLength),
+                topRadius: visualRadius,
+                bottomRadius: visualRadius,
+                color: layerColor.withAlpha(0.8),
+                outlineColor: layerColor.withAlpha(0.95),
+                tag: 'borehole-layer-model',
+            })
+            entity.properties = new PropertyBag({
+                domainType: 'borehole-layer-model',
+                targetId: borehole.id,
+                layerName: layer.layer_name,
+                tag: 'borehole-layer-model',
+            })
+            layerEntities.push(entity)
+        }
+
+        if (layerEntities.length > 0) {
+            boreholeLayerEntities.set(borehole.id, layerEntities)
+        }
+    }
 }
 
 /** 只在数据首次加载完成后自动飞向矿区。 */
@@ -132,156 +173,113 @@ function flyToMineOnce() {
 
 /** 添加钻孔点实体。 */
 function addBoreholes(boreholes: Borehole[]) {
+    if (!entityManager) {
+        return
+    }
+
     for (const borehole of boreholes) {
         if (borehole.longitude === 0 && borehole.latitude === 0) {
             continue
         }
-        const entity = viewer?.entities.add({
+        const entity = entityManager.addPoint({
             id: `borehole-${borehole.id}`,
             name: borehole.name,
-            position: Cartesian3.fromDegrees(borehole.longitude, borehole.latitude, borehole.elevation),
-            point: {
-                pixelSize: 13,
-                color: Color.fromCssColorString('#f2c94c'),
-                outlineColor: Color.fromCssColorString('#04110e'),
-                outlineWidth: 3,
-                heightReference: HeightReference.NONE,
-                disableDepthTestDistance: Number.POSITIVE_INFINITY,
-            },
-            label: {
-                text: borehole.borehole_code,
-                font: '13px Microsoft YaHei',
-                fillColor: Color.fromCssColorString('#eafff7'),
-                outlineColor: Color.fromCssColorString('#04110e'),
-                outlineWidth: 3,
-                style: LabelStyle.FILL_AND_OUTLINE,
-                verticalOrigin: VerticalOrigin.BOTTOM,
-                pixelOffset: new Cartesian2(0, -18),
-                disableDepthTestDistance: Number.POSITIVE_INFINITY,
-            },
-            properties: {
-                domainType: 'borehole',
-                targetId: borehole.id,
-            },
+            position: { lon: borehole.longitude, lat: borehole.latitude, height: borehole.elevation },
+            pixelSize: 13,
+            color: Color.fromCssColorString('#f2c94c'),
+            outlineColor: Color.fromCssColorString('#04110e'),
+            outlineWidth: 3,
+            labelText: borehole.borehole_code,
+            tag: 'borehole',
+        })
+        entity.properties = new PropertyBag({
+            domainType: 'borehole',
+            targetId: borehole.id,
+            tag: 'borehole',
         })
 
-        if (entity) {
-            boreholeEntities.set(borehole.id, entity)
-        }
+        boreholeEntities.set(borehole.id, entity)
     }
-}
-
-/** 根据底图键名创建 Cesium 影像 Provider。 */
-function createBasemapProvider(key: string) {
-    if (key === 'image') {
-        return new UrlTemplateImageryProvider({
-            url: 'https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
-            credit: 'Esri World Imagery',
-        })
-    }
-    if (key === 'osm') {
-        return new OpenStreetMapImageryProvider({
-            url: 'https://tile.openstreetmap.org/',
-        })
-    }
-    return new UrlTemplateImageryProvider({
-        url: 'https://services.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}',
-        credit: 'Esri World Topographic Map',
-    })
 }
 
 /** 切换快捷底图，同时保留 Cesium 原生底图选择器。 */
-function switchBasemap(key: string) {
-    if (!viewer) {
+function switchBasemap(key: BasemapKey) {
+    if (!viewerManager) {
         return
     }
-    const firstLayer = viewer.imageryLayers.length > 0 ? viewer.imageryLayers.get(0) : null
-    if (firstLayer) {
-        viewer.imageryLayers.remove(firstLayer, true)
-    }
+    viewerManager.switchBasemap(key)
     activeBasemapKey.value = key
-    viewer.imageryLayers.addImageryProvider(createBasemapProvider(key), 0)
 }
 
 /** 添加矿区与工作面边界实体。 */
 function addBoundaries(boundaries: BoundaryRegion[]) {
+    if (!entityManager) {
+        return
+    }
+
     for (const boundary of boundaries) {
-        const positions = Cartesian3.fromDegreesArray(boundary.coordinates.flat())
+        const positions = degreesArrayToCartesianArray(
+            boundary.coordinates.map((item) => ({ lon: item[0], lat: item[1], height: 0 })),
+        )
         const color = boundary.type === 'mine' ? Color.fromCssColorString('#23d18b') : Color.fromCssColorString('#56ccf2')
-        const polygon = viewer?.entities.add({
+        const polygon = entityManager.addPolygon({
             id: `boundary-${boundary.id}`,
             name: boundary.name,
-            polygon: {
-                hierarchy: new PolygonHierarchy(positions),
-                material: color.withAlpha(boundary.type === 'mine' ? 0.12 : 0.18),
-                outline: true,
-                outlineColor: color.withAlpha(0.95),
-            },
-            polyline: {
-                positions,
-                width: boundary.type === 'mine' ? 4 : 3,
-                material: color.withAlpha(0.95),
-                clampToGround: true,
-            },
-            properties: {
-                domainType: 'boundary',
-                targetId: boundary.id,
-                boundaryType: boundary.type,
-            },
+            positions,
+            color: color.withAlpha(boundary.type === 'mine' ? 0.12 : 0.18),
+            outlineColor: color.withAlpha(0.95),
+            outlineWidth: boundary.type === 'mine' ? 2 : 1,
+            tag: 'boundary',
+        })
+        const polyline = entityManager.addPolyline({
+            id: `boundary-outline-${boundary.id}`,
+            name: `${boundary.name}-outline`,
+            positions,
+            width: boundary.type === 'mine' ? 4 : 3,
+            color: color.withAlpha(0.95),
+            clampToGround: true,
+            tag: 'boundary',
         })
 
-        if (polygon) {
-            boundaryEntities.set(boundary.id, [polygon])
-        }
+        const boundaryProperties = new PropertyBag({
+            domainType: 'boundary',
+            targetId: boundary.id,
+            boundaryType: boundary.type,
+            tag: 'boundary',
+        })
+        polygon.properties = boundaryProperties
+        polyline.properties = boundaryProperties
+
+        boundaryEntities.set(boundary.id, [polygon, polyline])
     }
 }
 
 /** 添加 TIFF 元信息对应的影像叠加层。 */
 async function addRasterLayer(raster: RasterLayer | null) {
-    if (!viewer || !raster) {
+    if (!imageryLayerLoader || !raster) {
         return
     }
 
-    const provider = await SingleTileImageryProvider.fromUrl(raster.url || createRasterDataUrl(raster), {
-        rectangle: Rectangle.fromDegrees(raster.bounds.west, raster.bounds.south, raster.bounds.east, raster.bounds.north),
-    })
-    rasterLayer = viewer.imageryLayers.addImageryProvider(provider)
-    rasterLayer.alpha = store.getLayerState('raster')?.opacity ?? raster.opacity
-    rasterLayer.show = store.getLayerState('raster')?.visible ?? true
-}
-
-/** 生成用于演示 TIFF 叠加的栅格图片。 */
-function createRasterDataUrl(raster: RasterLayer): string {
-    const canvas = document.createElement('canvas')
-    canvas.width = 512
-    canvas.height = 512
-    const context = canvas.getContext('2d')
-    if (!context) {
-        return ''
+    const bounds = {
+        west: raster.bounds.west,
+        south: raster.bounds.south,
+        east: raster.bounds.east,
+        north: raster.bounds.north,
     }
 
-    const gradient = context.createLinearGradient(0, 0, 512, 512)
-    raster.legend_config.forEach((item, index) => {
-        gradient.addColorStop(index / Math.max(raster.legend_config.length - 1, 1), item.color)
-    })
-    context.globalAlpha = 0.78
-    context.fillStyle = gradient
-    context.fillRect(0, 0, 512, 512)
-    context.globalAlpha = 0.34
-    context.strokeStyle = '#06110e'
-    context.lineWidth = 5
-    for (let index = 0; index < 9; index += 1) {
-        context.beginPath()
-        context.ellipse(210 + index * 16, 270 - index * 10, 170 - index * 9, 74 - index * 4, -0.35, 0, Math.PI * 2)
-        context.stroke()
+    try {
+        rasterLayer = await imageryLayerLoader.addGeoTiffSingleTile(raster.url, bounds)
+        rasterLayer.alpha = store.getLayerState('raster')?.opacity ?? raster.opacity
+        rasterLayer.show = store.getLayerState('raster')?.visible ?? true
+    } catch (error) {
+        console.error('[MineScope3D] TIFF 栅格加载失败', { rasterId: raster.id, url: raster.url, error })
     }
-    return canvas.toDataURL('image/png')
 }
 
 /** 移除当前专题影像图层。 */
 function removeRasterLayer() {
-    if (viewer && rasterLayer) {
-        viewer.imageryLayers.remove(rasterLayer, true)
+    if (imageryLayerLoader && rasterLayer) {
+        imageryLayerLoader.remove(rasterLayer, true)
         rasterLayer = null
     }
 }
@@ -296,8 +294,19 @@ function syncLayerVisibility() {
 /** 同步钻孔点图层可见性。 */
 function syncBoreholeVisibility() {
     const layer = store.getLayerState('boreholes')
+    const modelVisible = (layer?.visible ?? true) && mapToolState.showLayerModel
+    if (layerManager) {
+        layerManager.setEntityVisible((entity) => readEntityProperty(entity, 'domainType') === 'borehole', layer?.visible ?? true)
+        layerManager.setEntityVisible((entity) => readEntityProperty(entity, 'domainType') === 'borehole-layer-model', modelVisible)
+        return
+    }
     for (const entity of boreholeEntities.values()) {
         entity.show = layer?.visible ?? true
+    }
+    for (const entities of boreholeLayerEntities.values()) {
+        for (const entity of entities) {
+            entity.show = modelVisible
+        }
     }
 }
 
@@ -309,13 +318,17 @@ function syncBoundaryVisibility() {
         const color = boundary.type === 'mine' ? Color.fromCssColorString('#23d18b') : Color.fromCssColorString('#56ccf2')
         const entities = boundaryEntities.get(boundary.id) ?? []
         for (const entity of entities) {
-            entity.show = layer?.visible ?? true
-            if (entity.polygon) {
-                entity.polygon.material = new ColorMaterialProperty(color.withAlpha((layer?.opacity ?? 0.72) * 0.24))
-                entity.polygon.outlineColor = new ConstantProperty(color.withAlpha(layer?.opacity ?? 0.72))
+            if (layerManager) {
+                layerManager.setEntityVisible((target) => target.id === entity.id, layer?.visible ?? true)
+            } else {
+                entity.show = layer?.visible ?? true
             }
-            if (entity.polyline) {
-                entity.polyline.material = new ColorMaterialProperty(color.withAlpha(layer?.opacity ?? 0.72))
+            if (entity.polygon && entity.id === `boundary-${boundary.id}`) {
+                ;(entity.polygon as any).material = color.withAlpha((layer?.opacity ?? 0.72) * 0.24)
+                ;(entity.polygon as any).outlineColor = color.withAlpha(layer?.opacity ?? 0.72)
+            }
+            if (entity.polyline && entity.id === `boundary-outline-${boundary.id}`) {
+                ;(entity.polyline as any).material = color.withAlpha(layer?.opacity ?? 0.72)
             }
         }
     }
@@ -325,13 +338,22 @@ function syncBoundaryVisibility() {
 function syncRasterVisibility() {
     const layer = store.getLayerState('raster')
     if (rasterLayer) {
-        rasterLayer.show = layer?.visible ?? true
-        rasterLayer.alpha = layer?.opacity ?? 0.62
+        if (layerManager) {
+            layerManager.setImageryLayerVisible(rasterLayer, layer?.visible ?? true)
+            layerManager.setImageryLayerOpacity(rasterLayer, layer?.opacity ?? 0.62)
+        } else {
+            rasterLayer.show = layer?.visible ?? true
+            rasterLayer.alpha = layer?.opacity ?? 0.62
+        }
     }
 }
 
 /** 处理地图点击选中对象。 */
 function handleMapClick(event: { position: Cartesian2 }) {
+    if (mapToolState.measuring) {
+        return
+    }
+
     const entity = pickEntity(event.position)
     if (!entity) {
         return
@@ -343,6 +365,9 @@ function handleMapClick(event: { position: Cartesian2 }) {
     }
     if (domainType === 'boundary') {
         store.selectBoundary(targetId)
+    }
+    if (domainType === 'borehole-layer-model') {
+        store.selectBorehole(targetId)
     }
 }
 
@@ -362,7 +387,7 @@ function handleMouseMove(event: { endPosition: Cartesian2 }) {
 
 /** 从屏幕坐标拾取业务实体。 */
 function pickEntity(position: Cartesian2): Entity | null {
-    const picked = viewer?.scene.pick(position)
+    const picked = interactionManager?.pickObject(position) ?? viewer?.scene.pick(position)
     if (defined(picked) && picked.id instanceof Entity) {
         return picked.id
     }
@@ -380,8 +405,8 @@ function flyToBorehole(id: string) {
     const borehole = store.boreholes.find((item) => item.id === id)
     const entity = boreholeEntities.get(id)
     store.selectBorehole(id)
-    if (viewer && borehole && entity) {
-        viewer.flyTo(entity, {
+    if (cameraManager && borehole && entity) {
+        cameraManager.flyTo(entity, {
             duration: 1.1,
             offset: {
                 heading: 0,
@@ -395,28 +420,28 @@ function flyToBorehole(id: string) {
 /** 飞行定位到指定边界对象。 */
 function flyToBoundary(id: string) {
     const boundary = store.boundaries.find((item) => item.id === id)
-    if (viewer && boundary) {
+    if (cameraManager && boundary) {
         store.selectBoundary(id)
-        viewer.camera.flyTo({ destination: buildBoundaryRectangle(boundary), duration: 1.1 })
+        cameraManager.flyToRectangle(buildBoundaryRectangle(boundary), 1.1)
     }
 }
 
 /** 飞行定位到指定图层范围。 */
 function flyToLayer(key: LayerKey) {
-    if (!viewer) {
+    if (!cameraManager) {
         return
     }
 
     if (key === 'boreholes') {
         const destination = buildBoreholeRectangle()
         if (destination) {
-            viewer.camera.flyTo({ destination, duration: 1.1 })
+            cameraManager.flyToRectangle(destination, 1.1)
         }
         return
     }
     if (key === 'raster' && store.activeRaster) {
         store.selectRaster(store.activeRaster.id)
-        viewer.camera.flyTo({ destination: buildRasterRectangle(store.activeRaster), duration: 1.1 })
+        cameraManager.flyToRectangle(buildRasterRectangle(store.activeRaster), 1.1)
         return
     }
 
@@ -425,7 +450,7 @@ function flyToLayer(key: LayerKey) {
     })
     if (targetBoundary) {
         store.selectBoundary(targetBoundary.id)
-        viewer.camera.flyTo({ destination: buildBoundaryRectangle(targetBoundary), duration: 1.1 })
+        cameraManager.flyToRectangle(buildBoundaryRectangle(targetBoundary), 1.1)
     }
 }
 
@@ -452,20 +477,60 @@ function buildRasterRectangle(raster: RasterLayer): Rectangle {
     return Rectangle.fromDegrees(raster.bounds.west, raster.bounds.south, raster.bounds.east, raster.bounds.north)
 }
 
+/** 切换测距模式。 */
+function toggleDistanceMeasure() {
+    if (!measureTool) {
+        return
+    }
+
+    if (mapToolState.measuring) {
+        stopDistanceMeasure()
+        return
+    }
+
+    mapToolState.measuring = true
+    mapToolState.measureResult = '测距中：左键选两点，右键取消'
+    measureTool.startDistance((result) => {
+        mapToolState.measuring = false
+        mapToolState.measureResult = `测距结果：${(result.distanceMeters ?? 0).toFixed(2)} m`
+    })
+}
+
+/** 停止测距模式。 */
+function stopDistanceMeasure() {
+    measureTool?.stop()
+    mapToolState.measuring = false
+    if (!mapToolState.measureResult) {
+        mapToolState.measureResult = '测距已停止'
+    }
+}
+
+/** 清理测距结果。 */
+function clearMeasureResult() {
+    measureTool?.stop()
+    measureTool?.clear()
+    mapToolState.measuring = false
+    mapToolState.measureResult = ''
+}
+
 /** 销毁 Cesium 场景和事件处理器。 */
 function destroyScene() {
-    clickHandler?.destroy()
-    hoverHandler?.destroy()
-    if (viewer && !viewer.isDestroyed()) {
-        viewer.destroy()
-    }
+    measureTool?.destroy()
+    interactionManager?.destroy()
+    viewerManager?.destroy()
     viewer = null
-    clickHandler = null
-    hoverHandler = null
+    viewerManager = null
+    cameraManager = null
+    entityManager = null
+    interactionManager = null
+    layerManager = null
+    imageryLayerLoader = null
+    measureTool = null
 }
 
 watch(readLayerSignature, syncLayerVisibility)
 watch(readDataSignature, reloadSceneData)
+watch(() => mapToolState.showLayerModel, syncBoreholeVisibility)
 onMounted(mountScene)
 onBeforeUnmount(destroyScene)
 
@@ -482,6 +547,17 @@ defineExpose({ flyToBorehole, flyToBoundary, flyToLayer })
                 {{ option.name }}
             </button>
         </div>
+        <div class="map-tools" aria-label="空间分析工具">
+            <button type="button" :class="{ 'is-active': mapToolState.measuring }" @click="toggleDistanceMeasure">
+                {{ mapToolState.measuring ? '结束测距' : '测距' }}
+            </button>
+            <button type="button" @click="clearMeasureResult">清除测量</button>
+            <label>
+                <input v-model="mapToolState.showLayerModel" type="checkbox">
+                分层模型
+            </label>
+            <span v-if="mapToolState.measureResult">{{ mapToolState.measureResult }}</span>
+        </div>
         <div class="map-reticle"></div>
         <div class="map-status">
             <span>WGS84</span>
@@ -493,3 +569,194 @@ defineExpose({ flyToBorehole, flyToBoundary, flyToLayer })
         </div>
     </div>
 </template>
+
+<style scoped>
+.cesium-shell,
+.cesium-map {
+    position: absolute;
+    inset: 0;
+}
+
+.cesium-map canvas {
+    filter: none;
+}
+
+.basemap-switcher {
+    position: absolute;
+    z-index: 6;
+    top: 16px;
+    left: 50%;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px;
+    border: 1px solid rgba(125, 211, 252, 0.36);
+    border-radius: 8px;
+    background: rgba(5, 19, 48, 0.58);
+    color: var(--muted);
+    backdrop-filter: blur(14px);
+    box-shadow: 0 12px 30px rgba(0, 0, 0, 0.28);
+    transform: translateX(-50%);
+}
+
+.basemap-switcher span {
+    padding: 0 4px;
+    color: rgba(226, 239, 255, 0.82);
+    font-size: 12px;
+    white-space: nowrap;
+}
+
+.basemap-switcher button {
+    min-width: 42px;
+    height: 28px;
+    border: 1px solid rgba(125, 211, 252, 0.28);
+    border-radius: 6px;
+    background: rgba(8, 31, 72, 0.62);
+    color: rgba(226, 239, 255, 0.82);
+    font-size: 12px;
+    cursor: pointer;
+    transition: border-color 0.2s ease, background 0.2s ease, color 0.2s ease;
+}
+
+.basemap-switcher button:hover,
+.basemap-switcher button.is-active {
+    border-color: rgba(35, 209, 139, 0.78);
+    background: rgba(35, 209, 139, 0.18);
+    color: #ffffff;
+}
+
+.map-tools {
+    position: absolute;
+    z-index: 6;
+    top: 64px;
+    left: 50%;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    max-width: min(80%, 980px);
+    padding: 6px 10px;
+    border: 1px solid rgba(125, 211, 252, 0.34);
+    border-radius: 8px;
+    background: rgba(5, 19, 48, 0.6);
+    color: rgba(226, 239, 255, 0.86);
+    backdrop-filter: blur(14px);
+    box-shadow: 0 12px 30px rgba(0, 0, 0, 0.28);
+    transform: translateX(-50%);
+}
+
+.map-tools button {
+    height: 28px;
+    padding: 0 10px;
+    border: 1px solid rgba(125, 211, 252, 0.28);
+    border-radius: 6px;
+    background: rgba(8, 31, 72, 0.62);
+    color: rgba(226, 239, 255, 0.82);
+    font-size: 12px;
+    cursor: pointer;
+    transition: border-color 0.2s ease, background 0.2s ease, color 0.2s ease;
+}
+
+.map-tools button:hover,
+.map-tools button.is-active {
+    border-color: rgba(35, 209, 139, 0.78);
+    background: rgba(35, 209, 139, 0.18);
+    color: #ffffff;
+}
+
+.map-tools label {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--muted);
+    font-size: 12px;
+    white-space: nowrap;
+}
+
+.map-tools input[type="checkbox"] {
+    accent-color: #23d18b;
+}
+
+.map-tools span {
+    color: #fff9da;
+    font-size: 12px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.map-reticle {
+    position: absolute;
+    inset: 18px;
+    pointer-events: none;
+    border: 1px solid rgba(125, 211, 252, 0.24);
+    border-radius: 8px;
+}
+
+.map-reticle::before,
+.map-reticle::after {
+    content: "";
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    background: rgba(125, 211, 252, 0.54);
+    transform: translate(-50%, -50%);
+}
+
+.map-reticle::before {
+    width: 92px;
+    height: 1px;
+}
+
+.map-reticle::after {
+    width: 1px;
+    height: 92px;
+}
+
+.map-status {
+    position: absolute;
+    left: 342px;
+    right: 372px;
+    bottom: 170px;
+    display: flex;
+    justify-content: space-between;
+    padding: 7px 12px;
+    border: 1px solid rgba(96, 165, 250, 0.34);
+    border-radius: 8px;
+    background: rgba(5, 19, 48, 0.54);
+    color: var(--muted);
+    backdrop-filter: blur(12px);
+}
+
+.map-status strong {
+    color: var(--green);
+}
+
+.map-tooltip {
+    position: absolute;
+    z-index: 5;
+    pointer-events: none;
+    padding: 8px 10px;
+    border: 1px solid rgba(125, 211, 252, 0.54);
+    border-radius: 6px;
+    color: #fff9da;
+    background: rgba(5, 19, 48, 0.9);
+    box-shadow: var(--shadow);
+}
+
+:deep(.cesium-viewer-toolbar) {
+    top: 16px;
+    right: 16px;
+}
+
+:deep(.cesium-baseLayerPicker-dropDown) {
+    background: rgba(5, 19, 48, 0.92);
+    border: 1px solid rgba(125, 211, 252, 0.34);
+}
+
+@media (max-width: 1500px) {
+    .map-status {
+        left: 324px;
+        right: 354px;
+    }
+}
+</style>

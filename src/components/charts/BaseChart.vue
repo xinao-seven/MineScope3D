@@ -62,3 +62,10 @@ onBeforeUnmount(disposeChart)
 <template>
   <div ref="chartRef" class="base-chart"></div>
 </template>
+
+<style scoped>
+.base-chart {
+  width: 100%;
+  height: 100%;
+}
+</style>
