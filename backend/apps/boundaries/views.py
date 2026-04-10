@@ -1,13 +1,12 @@
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from apps.boreholes.services.excel_import_service import load_boreholes
 from .services import get_boundary_detail, get_boundary_geojson, get_boundary_list
 
 
 class BoundaryListView(APIView):
     def get(self, request):
-        """返回本地 SHP 解析得到的边界列表。"""
-        return Response(get_boundary_list(boundary_type=request.query_params.get('type'), boreholes=load_boreholes()))
+        """返回数据库中的边界列表。"""
+        return Response(get_boundary_list(boundary_type=request.query_params.get('type')))
 
 
 class BoundaryDetailView(APIView):

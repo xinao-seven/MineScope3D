@@ -1,12 +1,18 @@
-"""SHP 边界本地文件解析服务。"""
+"""SHP 边界导入与数据库查询服务。"""
 from pathlib import Path
 from typing import Any
+import json
 
 import shapefile
 from django.conf import settings
+from django.contrib.gis.geos import GEOSGeometry
+from django.db import transaction
 from pyproj import CRS, Transformer
 
-TARGET_CRS = 'EPSG:4326'
+from apps.boreholes.models import Borehole
+from apps.boundaries.models import BoundaryRegion
+from apps.boundaries.serializers import BoundaryRegionSerializer
+
 DATA_DIR = Path(settings.BASE_DIR) / 'data'
 SHP_DIR = DATA_DIR / 'shp'
 SHP_CONFIG = [
@@ -102,7 +108,9 @@ def shape_to_geojson(shape: shapefile.Shape, transformer: Transformer) -> dict[s
     if shape.shapeType in (shapefile.POLYGON, shapefile.POLYGONZ, shapefile.POLYGONM):
         return {'type': 'Polygon', 'coordinates': [ensure_ring_closed(part) for part in parts]}
     if shape.shapeType in (shapefile.POLYLINE, shapefile.POLYLINEZ, shapefile.POLYLINEM):
-        return {'type': 'LineString', 'coordinates': parts[0]} if len(parts) == 1 else {'type': 'MultiLineString', 'coordinates': parts}
+        if len(parts) == 1:
+            return {'type': 'LineString', 'coordinates': parts[0]}
+        return {'type': 'MultiLineString', 'coordinates': parts}
     if shape.shapeType in (shapefile.POINT, shapefile.POINTZ, shapefile.POINTM):
         return {'type': 'Point', 'coordinates': parts[0][0]}
     return None
@@ -128,24 +136,15 @@ def read_outer_ring(geometry: dict[str, Any]) -> list[list[float]]:
     return []
 
 
-def compute_bounds(coords: list[list[float]]) -> tuple[float, float, float, float]:
-    """计算坐标外包框。"""
-    lons = [coord[0] for coord in coords]
-    lats = [coord[1] for coord in coords]
-    return min(lons), min(lats), max(lons), max(lats)
+def count_boreholes_by_geometry(geometry: GEOSGeometry) -> int:
+    """基于边界几何统计边界内钻孔数量。"""
+    if geometry.geom_type in ('Polygon', 'MultiPolygon'):
+        return Borehole.objects.filter(geom__within=geometry).count()
+    return 0
 
 
-def count_boreholes_in_bounds(coords: list[list[float]], boreholes: list[dict[str, Any]]) -> int:
-    """按外包框粗略统计区域内钻孔数。"""
-    if not coords:
-        return 0
-    west, south, east, north = compute_bounds(coords)
-    return sum(1 for item in boreholes if west <= item.get('longitude', 0) <= east and south <= item.get('latitude', 0) <= north)
-
-
-def build_boundary_items(boreholes: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
-    """读取全部本地 SHP 并转换为前端边界对象。"""
-    borehole_items = boreholes or []
+def parse_boundaries_from_shp() -> list[dict[str, Any]]:
+    """读取 SHP 并转换为入库对象列表。"""
     result = []
     item_index = 1
     for config in SHP_CONFIG:
@@ -156,6 +155,7 @@ def build_boundary_items(boreholes: list[dict[str, Any]] | None = None) -> list[
         transformer = build_transformer(source_crs)
         reader = open_reader(shp_path)
         field_names = [field[0] for field in reader.fields[1:]]
+
         for shape_record in reader.shapeRecords():
             geometry = shape_to_geojson(shape_record.shape, transformer)
             if not geometry:
@@ -164,42 +164,70 @@ def build_boundary_items(boreholes: list[dict[str, Any]] | None = None) -> list[
                 field_name: to_json_value(value)
                 for field_name, value in zip(field_names, list(shape_record.record))
             }
-            coordinates = read_outer_ring(geometry)
+            geos_geom = GEOSGeometry(json.dumps(geometry), srid=4326)
+            borehole_count = count_boreholes_by_geometry(geos_geom)
             result.append({
-                'id': f'{config["type"]}-{item_index}',
                 'name': pick_name(properties, config['fallback_name'], item_index),
                 'type': config['type'],
                 'area': round(abs(shape_record.shape.area) / 1_000_000, 3) if hasattr(shape_record.shape, 'area') else 0,
-                'perimeter': 0,
-                'borehole_count': count_boreholes_in_bounds(coordinates, borehole_items),
+                'perimeter': round(float(geos_geom.length), 6),
+                'borehole_count': borehole_count,
                 'properties': {'source': config['source'], 'sourceCrs': source_crs.to_string(), **properties},
-                'coordinates': coordinates,
-                'geojson': geometry,
+                'source': config['source'],
+                'source_crs': source_crs.to_string(),
+                'geom': geos_geom,
             })
             item_index += 1
     return result
 
 
+@transaction.atomic
+def import_boundaries_from_shp(replace_existing: bool = True) -> dict[str, int]:
+    """将本地 SHP 边界数据导入数据库。"""
+    rows = parse_boundaries_from_shp()
+    if replace_existing:
+        BoundaryRegion.objects.all().delete()
+    for row in rows:
+        BoundaryRegion.objects.create(**row)
+    return {'boundaries': len(rows)}
+
+
 def get_boundary_list(boundary_type: str | None = None, boreholes: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
     """按类型返回边界对象列表。"""
-    items = build_boundary_items(boreholes=boreholes)
+    del boreholes
+    queryset = BoundaryRegion.objects.all()
     if boundary_type:
-        items = [item for item in items if item['type'] == boundary_type]
-    return items
+        queryset = queryset.filter(type=boundary_type)
+    return BoundaryRegionSerializer(queryset, many=True).data
 
 
 def get_boundary_detail(boundary_id: str) -> dict[str, Any] | None:
     """按编号返回边界详情。"""
-    return next((item for item in build_boundary_items() if item['id'] == boundary_id), None)
+    boundary = BoundaryRegion.objects.filter(id=boundary_id).first()
+    if not boundary:
+        return None
+    return BoundaryRegionSerializer(boundary).data
 
 
 def get_boundary_geojson(boundary_type: str | None = None) -> dict[str, Any]:
     """返回边界 GeoJSON 集合。"""
+    queryset = BoundaryRegion.objects.all()
+    if boundary_type:
+        queryset = queryset.filter(type=boundary_type)
+
     features = []
-    for item in get_boundary_list(boundary_type=boundary_type):
+    for item in queryset:
         features.append({
             'type': 'Feature',
-            'geometry': item['geojson'],
-            'properties': {key: value for key, value in item.items() if key not in ('geojson', 'coordinates')},
+            'geometry': json.loads(item.geom.geojson),
+            'properties': {
+                'id': str(item.id),
+                'name': item.name,
+                'type': item.type,
+                'area': item.area,
+                'perimeter': item.perimeter,
+                'borehole_count': item.borehole_count,
+                'properties': item.properties,
+            },
         })
     return {'type': 'FeatureCollection', 'features': features}

@@ -1,17 +1,21 @@
-"""TIFF 栅格本地文件解析服务。"""
+"""TIFF 栅格导入与数据库查询服务。"""
 from pathlib import Path
 from typing import Any
 import struct
 
 from django.conf import settings
+from django.contrib.gis.geos import Polygon
+from django.db import transaction
 from PIL import Image
 from pyproj import CRS, Transformer
+
+from apps.rasters.models import RasterLayer
+from apps.rasters.serializers import RasterLayerSerializer
 
 DATA_DIR = Path(settings.BASE_DIR) / 'data'
 TIF_DIR = DATA_DIR / 'tif'
 MINE_PRJ_FILE = DATA_DIR / 'shp' / '锦界矿边界.prj'
 PREVIEW_DIR = Path(settings.STATIC_ROOT) / 'tif-previews'
-TARGET_CRS = 'EPSG:4326'
 FALLBACK_SOURCE_CRS = ('EPSG:4326', 'EPSG:32649', 'EPSG:32648', 'EPSG:4547', 'EPSG:4548')
 
 
@@ -167,38 +171,68 @@ def build_legend() -> list[dict[str, str]]:
 
 
 def build_raster_item(tif_path: Path) -> dict[str, Any] | None:
-    """将单个 TIFF 文件转换为前端专题图对象。"""
+    """将单个 TIFF 文件转换为入库对象。"""
     tfw_path = tif_path.with_suffix('.tfw')
     if not tfw_path.exists():
         return None
     width, height = read_tiff_size(tif_path)
     bounds, source_crs = compute_bounds(width, height, read_tfw(tfw_path))
     preview_url = ensure_preview(tif_path)
+    polygon = Polygon.from_bbox((bounds['west'], bounds['south'], bounds['east'], bounds['north']))
+    polygon.srid = 4326
     return {
-        'id': tif_path.stem,
         'name': tif_path.stem,
         'type': 'subsidence',
         'url': preview_url,
-        'bounds': bounds,
+        'bounds': polygon,
+        'west': bounds['west'],
+        'south': bounds['south'],
+        'east': bounds['east'],
+        'north': bounds['north'],
         'opacity': 0.62,
         'legend_config': build_legend(),
         'description': f'由本地 TIFF 文件 {tif_path.name} 解析生成，源坐标系 {source_crs}',
+        'source_crs': source_crs,
         'time_tag': tif_path.stem,
     }
 
 
-def get_raster_list() -> list[dict[str, Any]]:
-    """读取全部本地 TIFF 专题图层。"""
+def list_tif_files() -> list[Path]:
+    """扫描本地 TIFF 文件。"""
     if not TIF_DIR.exists():
         return []
-    items = []
-    for tif_path in sorted(TIF_DIR.glob('*.tif')):
+    return sorted([*TIF_DIR.glob('*.tif'), *TIF_DIR.glob('*.tiff')])
+
+
+@transaction.atomic
+def import_rasters_from_tif(remove_missing: bool = True) -> dict[str, int]:
+    """将本地 TIFF 专题图层导入数据库。"""
+    rows = []
+    for tif_path in list_tif_files():
         item = build_raster_item(tif_path)
         if item:
-            items.append(item)
-    return items
+            rows.append(item)
+
+    seen_names: set[str] = set()
+    for row in rows:
+        RasterLayer.objects.update_or_create(name=row['name'], defaults=row)
+        seen_names.add(row['name'])
+
+    if remove_missing:
+        RasterLayer.objects.exclude(name__in=seen_names).delete()
+
+    return {'rasters': len(rows)}
+
+
+def get_raster_list() -> list[dict[str, Any]]:
+    """读取数据库中的专题图层。"""
+    queryset = RasterLayer.objects.all()
+    return RasterLayerSerializer(queryset, many=True).data
 
 
 def get_raster_detail(raster_id: str) -> dict[str, Any] | None:
     """按编号返回单个专题图层。"""
-    return next((item for item in get_raster_list() if item['id'] == raster_id), None)
+    raster = RasterLayer.objects.filter(id=raster_id).first()
+    if not raster:
+        return None
+    return RasterLayerSerializer(raster).data

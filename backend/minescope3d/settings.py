@@ -4,11 +4,61 @@ import os
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+
+def load_env_file(env_path: Path):
+    """加载 .env 文件中的键值到进程环境变量。"""
+    if not env_path.exists():
+        return
+    for raw_line in env_path.read_text(encoding='utf-8', errors='ignore').splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith('#') or '=' not in line:
+            continue
+        key, value = line.split('=', 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        os.environ.setdefault(key, value)
+
+
+for env_path in (BASE_DIR / '.env', BASE_DIR.parent / '.env'):
+    load_env_file(env_path)
+
+
+def resolve_library_path(env_key: str, fallback_paths: list[str]) -> str:
+    """优先读取环境变量，否则使用存在的本地动态库路径。"""
+    env_value = os.getenv(env_key, '').strip()
+    if env_value:
+        return env_value
+    for candidate in fallback_paths:
+        if Path(candidate).exists():
+            return candidate
+    return ''
+
+
+if os.name == 'nt':
+    GDAL_LIBRARY_PATH = resolve_library_path(
+        'GDAL_LIBRARY_PATH',
+        [
+            r'C:\Program Files\PostgreSQL\18\bin\libgdal-35.dll',
+            r'C:\Program Files\PostgreSQL\17\bin\libgdal-35.dll',
+            r'C:\Program Files\PostgreSQL\16\bin\libgdal-35.dll',
+        ],
+    )
+    GEOS_LIBRARY_PATH = resolve_library_path(
+        'GEOS_LIBRARY_PATH',
+        [
+            r'C:\Program Files\PostgreSQL\18\bin\libgeos_c.dll',
+            r'C:\Program Files\PostgreSQL\17\bin\libgeos_c.dll',
+            r'C:\Program Files\PostgreSQL\16\bin\libgeos_c.dll',
+        ],
+    )
+
 SECRET_KEY = os.getenv('DJANGO_SECRET_KEY', 'minescope3d-dev-secret')
 DEBUG = os.getenv('DJANGO_DEBUG', 'true').lower() == 'true'
 ALLOWED_HOSTS = os.getenv('DJANGO_ALLOWED_HOSTS', '127.0.0.1,localhost').split(',')
 
 INSTALLED_APPS = [
+    'django.contrib.contenttypes',
+    'django.contrib.gis',
     'django.contrib.staticfiles',
     'corsheaders',
     'rest_framework',
@@ -45,9 +95,19 @@ WSGI_APPLICATION = 'minescope3d.wsgi.application'
 
 DATABASES = {
     'default': {
-        'ENGINE': 'django.db.backends.dummy',
+        'ENGINE': os.getenv('DJANGO_DB_ENGINE', 'django.contrib.gis.db.backends.postgis'),
+        'NAME': os.getenv('POSTGRES_DB', os.getenv('PGDATABASE', 'minegis')),
+        'USER': os.getenv('POSTGRES_USER', os.getenv('PGUSER', 'postgres')),
+        'PASSWORD': os.getenv('POSTGRES_PASSWORD', os.getenv('PGPASSWORD', '')),
+        'HOST': os.getenv('POSTGRES_HOST', os.getenv('PGHOST', '127.0.0.1')),
+        'PORT': os.getenv('POSTGRES_PORT', os.getenv('PGPORT', '5432')),
+        'CONN_MAX_AGE': int(os.getenv('POSTGRES_CONN_MAX_AGE', '60')),
     },
 }
+
+db_schema = os.getenv('POSTGRES_SCHEMA', os.getenv('PGSCHEMA', 'public')).strip()
+if db_schema:
+    DATABASES['default']['OPTIONS'] = {'options': f'-c search_path={db_schema}'}
 
 LANGUAGE_CODE = 'zh-hans'
 TIME_ZONE = 'Asia/Shanghai'

@@ -1,64 +1,66 @@
 from collections import Counter
 
+from django.db.models import Count
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from apps.boreholes.services.excel_import_service import load_boreholes
-from apps.boundaries.services import get_boundary_list
-from apps.rasters.services import get_raster_list
+from apps.boreholes.models import Borehole, BoreholeLayer
+from apps.boundaries.models import BoundaryRegion
+from apps.rasters.models import RasterLayer
 
 
 class DashboardOverviewView(APIView):
     def get(self, request):
-        """返回基于本地文件的总览统计。"""
-        boreholes = load_boreholes()
-        boundaries = get_boundary_list(boreholes=boreholes)
-        rasters = get_raster_list()
+        """返回基于数据库的总览统计。"""
         return Response({
-            'boreholeTotal': len(boreholes),
-            'workfaceTotal': len({item['workface_name'] for item in boreholes if item['workface_name']}),
-            'boundaryTotal': len(boundaries),
-            'rasterTotal': len(rasters),
+            'boreholeTotal': Borehole.objects.count(),
+            'workfaceTotal': Borehole.objects.exclude(workface_name='').values('workface_name').distinct().count(),
+            'boundaryTotal': BoundaryRegion.objects.count(),
+            'rasterTotal': RasterLayer.objects.count(),
         })
 
 
 class LayerDistributionView(APIView):
     def get(self, request):
-        """返回本地钻孔分层类型占比。"""
-        counter: Counter[str] = Counter()
-        for borehole in load_boreholes():
-            for layer in borehole['layers']:
-                if layer['thickness'] > 0:
-                    counter[layer['layer_name']] += 1
-        return Response([{'name': name, 'value': value} for name, value in counter.most_common()])
+        """返回数据库中的钻孔分层类型占比。"""
+        rows = (
+            BoreholeLayer.objects
+            .filter(thickness__gt=0)
+            .values('layer_name')
+            .annotate(value=Count('id'))
+            .order_by('-value')
+        )
+        return Response([{'name': row['layer_name'], 'value': row['value']} for row in rows])
 
 
 class WorkfaceBoreholesView(APIView):
     def get(self, request):
-        """返回本地工作面边界内的钻孔数量统计。"""
-        boreholes = load_boreholes()
-        workfaces = [
-            item
-            for item in get_boundary_list(boundary_type='workface', boreholes=boreholes)
-            if item['borehole_count'] > 0
-        ]
-        rows = sorted(workfaces, key=lambda item: item['borehole_count'], reverse=True)[:14]
+        """返回数据库中的工作面钻孔数量统计。"""
+        rows = list(
+            BoundaryRegion.objects
+            .filter(type=BoundaryRegion.TYPE_WORKFACE, borehole_count__gt=0)
+            .order_by('-borehole_count')[:14]
+        )
         if rows:
-            return Response([{'name': item['name'], 'value': item['borehole_count']} for item in rows])
-        counter = Counter(item['workface_name'] or '本地钻孔数据' for item in boreholes)
+            return Response([{'name': item.name, 'value': item.borehole_count} for item in rows])
+
+        counter = Counter(
+            value
+            for value in Borehole.objects.values_list('workface_name', flat=True)
+            if value
+        )
         return Response([{'name': name, 'value': value} for name, value in counter.items()])
 
 
 class BoreholeDepthDistributionView(APIView):
     def get(self, request):
-        """返回本地钻孔动态深度区间分布。"""
-        boreholes = load_boreholes()
-        ranges = build_depth_ranges(boreholes)
-        return Response([build_depth_range(row, boreholes) for row in ranges])
+        """返回数据库中的钻孔动态深度区间分布。"""
+        depths = [depth for depth in Borehole.objects.values_list('depth_total', flat=True) if depth > 0]
+        ranges = build_depth_ranges(depths)
+        return Response([build_depth_range(row, depths) for row in ranges])
 
 
-def build_depth_ranges(boreholes: list[dict]) -> list[tuple[str, int, int | None]]:
+def build_depth_ranges(depths: list[float]) -> list[tuple[str, int, int | None]]:
     """根据真实钻孔深度生成 20 米粒度分箱。"""
-    depths = [item['depth_total'] for item in boreholes if item['depth_total'] > 0]
     if not depths:
         return []
     min_depth = int(min(depths) // 20 * 20)
@@ -72,12 +74,11 @@ def build_depth_ranges(boreholes: list[dict]) -> list[tuple[str, int, int | None
     return ranges
 
 
-def build_depth_range(row: tuple[str, int, int | None], boreholes: list[dict]) -> dict:
+def build_depth_range(row: tuple[str, int, int | None], depths: list[float]) -> dict:
     """统计单个深度区间的钻孔数量。"""
     name, min_depth, max_depth = row
     value = 0
-    for borehole in boreholes:
-        depth = borehole['depth_total']
+    for depth in depths:
         if depth >= min_depth and (max_depth is None or depth < max_depth):
             value += 1
     return {'name': name, 'value': value}

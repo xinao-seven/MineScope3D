@@ -1,17 +1,29 @@
-"""钻孔 Excel 本地文件解析服务。"""
+"""钻孔 Excel 导入与数据库查询服务。"""
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import openpyxl
 from django.conf import settings
+from django.contrib.gis.geos import Point
+from django.db import transaction
 from pyproj import CRS, Transformer
 
-FIELD_MAP = {
-    'borehole_name': '钻孔名称',
-    'layer_name': '地层名称',
-    'depth': '深度',
-    'thickness': '厚度',
+from apps.boreholes.models import Borehole, BoreholeLayer
+from apps.boreholes.serializers import BoreholeSerializer
+
+LAYER_FIELD_ALIASES = {
+    'borehole_name': ('钻孔名称', '孔号', 'borehole_name', 'name'),
+    'layer_name': ('地层名称', '层位', 'layer_name'),
+    'depth': ('深度', 'bottom_depth', 'depth'),
+    'thickness': ('厚度', 'thickness'),
+}
+
+LOCATION_FIELD_ALIASES = {
+    'name': ('name', '钻孔名称', '孔号', 'borehole_name'),
+    'x': ('x', 'X', '经度', '东坐标', 'lon', 'longitude'),
+    'y': ('y', 'Y', '纬度', '北坐标', 'lat', 'latitude'),
+    'z': ('z', 'Z', '高程', 'elevation'),
 }
 
 LAYER_COLORS = {
@@ -57,6 +69,18 @@ def read_float(value: Any, default: float = 0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def resolve_column(header: list[str], aliases: tuple[str, ...], required: bool = True) -> int | None:
+    """按字段别名解析列索引。"""
+    normalized = {name.strip().lower(): index for index, name in enumerate(header) if name}
+    for alias in aliases:
+        index = normalized.get(alias.strip().lower())
+        if index is not None:
+            return index
+    if required:
+        raise ValueError(f'Excel 缺少列: {aliases}')
+    return None
 
 
 def discover_layer_files() -> list[Path]:
@@ -110,23 +134,23 @@ def load_location_index() -> dict[str, BoreholeLocation]:
     workbook = openpyxl.load_workbook(location_file, read_only=True, data_only=True)
     sheet = workbook.active
     header = [read_cell_text(value) for value in next(sheet.iter_rows(min_row=1, max_row=1, values_only=True))]
-    column_index = {name: index for index, name in enumerate(header) if name}
-    required = {'name', 'x', 'y', 'z'}
-    missing = required - set(column_index)
-    if missing:
-        raise ValueError(f'钻孔位置表缺少列：{missing}')
+    index_name = resolve_column(header, LOCATION_FIELD_ALIASES['name'])
+    index_x = resolve_column(header, LOCATION_FIELD_ALIASES['x'])
+    index_y = resolve_column(header, LOCATION_FIELD_ALIASES['y'])
+    index_z = resolve_column(header, LOCATION_FIELD_ALIASES['z'], required=False)
 
     result: dict[str, BoreholeLocation] = {}
     for row in sheet.iter_rows(min_row=2, values_only=True):
-        name = read_cell_text(row[column_index['name']])
+        name = read_cell_text(row[index_name])
         if not name:
             continue
         result[name] = BoreholeLocation(
             name=name,
-            x=read_float(row[column_index['x']]),
-            y=read_float(row[column_index['y']]),
-            z=read_float(row[column_index['z']]),
+            x=read_float(row[index_x]),
+            y=read_float(row[index_y]),
+            z=read_float(row[index_z]) if index_z is not None else 0,
         )
+    workbook.close()
     return result
 
 
@@ -154,19 +178,19 @@ def parse_layer_file(layer_file: Path) -> dict[str, list[dict[str, Any]]]:
     workbook = openpyxl.load_workbook(layer_file, read_only=True, data_only=True)
     sheet = workbook.active
     header = [read_cell_text(value) for value in next(sheet.iter_rows(min_row=1, max_row=1, values_only=True))]
-    column_index = {name: index for index, name in enumerate(header) if name}
-    missing = [field for field in FIELD_MAP.values() if field not in column_index]
-    if missing:
-        raise ValueError(f'{layer_file.name} 缺少列：{missing}')
+    index_name = resolve_column(header, LAYER_FIELD_ALIASES['borehole_name'])
+    index_layer = resolve_column(header, LAYER_FIELD_ALIASES['layer_name'])
+    index_depth = resolve_column(header, LAYER_FIELD_ALIASES['depth'])
+    index_thickness = resolve_column(header, LAYER_FIELD_ALIASES['thickness'])
 
     result: dict[str, list[dict[str, Any]]] = {}
     for row in sheet.iter_rows(min_row=2, values_only=True):
-        borehole_name = read_cell_text(row[column_index[FIELD_MAP['borehole_name']]])
-        layer_name = read_cell_text(row[column_index[FIELD_MAP['layer_name']]])
+        borehole_name = read_cell_text(row[index_name])
+        layer_name = read_cell_text(row[index_layer])
         if not borehole_name or not layer_name:
             continue
-        bottom_depth = read_float(row[column_index[FIELD_MAP['depth']]])
-        thickness = read_float(row[column_index[FIELD_MAP['thickness']]])
+        bottom_depth = read_float(row[index_depth])
+        thickness = read_float(row[index_thickness])
         layer = {
             'layer_name': layer_name,
             'top_depth': round(max(bottom_depth - thickness, 0), 4),
@@ -175,6 +199,7 @@ def parse_layer_file(layer_file: Path) -> dict[str, list[dict[str, Any]]]:
             'color': pick_layer_color(layer_name),
         }
         result.setdefault(borehole_name, []).append(layer)
+    workbook.close()
     return result
 
 
@@ -188,11 +213,10 @@ def load_layer_groups() -> dict[str, list[dict[str, Any]]]:
     return merged
 
 
-def build_borehole_item(index: int, name: str, layers: list[dict[str, Any]], location: BoreholeLocation | None, transformer: Transformer) -> dict[str, Any]:
-    """组装前端使用的钻孔对象。"""
+def build_borehole_item(name: str, layers: list[dict[str, Any]], location: BoreholeLocation | None, transformer: Transformer) -> dict[str, Any]:
+    """组装入库用钻孔对象。"""
     sorted_layers = sorted(layers, key=lambda item: (item['top_depth'], item['bottom_depth']))
     for sort_order, layer in enumerate(sorted_layers, start=1):
-        layer['id'] = f'{name}-{sort_order}'
         layer['sort_order'] = sort_order
 
     lon = 0.0
@@ -205,7 +229,6 @@ def build_borehole_item(index: int, name: str, layers: list[dict[str, Any]], loc
             elevation = location.z
 
     return {
-        'id': str(index),
         'borehole_code': name,
         'name': name,
         'longitude': round(lon, 8),
@@ -213,36 +236,98 @@ def build_borehole_item(index: int, name: str, layers: list[dict[str, Any]], loc
         'elevation': round(elevation, 3),
         'depth_total': max((layer['bottom_depth'] for layer in sorted_layers), default=0),
         'workface_name': '本地钻孔数据',
-        'remark': '由 backend/data/boreholes 与 backend/data/location 解析',
+        'remark': '由 backend/data/boreholes 与 backend/data/location 导入 PostGIS',
         'layers': sorted_layers,
     }
 
 
-def load_boreholes() -> list[dict[str, Any]]:
-    """加载全部本地钻孔数据。"""
+def parse_boreholes_from_files() -> list[dict[str, Any]]:
+    """解析本地 Excel 数据为钻孔对象列表。"""
     transformer = build_transformer()
     locations = load_location_index()
     layer_groups = load_layer_groups()
     result = []
-    for index, (name, layers) in enumerate(sorted(layer_groups.items()), start=1):
+    for name, layers in sorted(layer_groups.items()):
         location = match_location(name, locations)
-        result.append(build_borehole_item(index, name, layers, location, transformer))
+        result.append(build_borehole_item(name, layers, location, transformer))
     return result
+
+
+@transaction.atomic
+def import_boreholes_from_excel(remove_missing: bool = True) -> dict[str, int]:
+    """将本地 Excel 钻孔数据导入数据库。"""
+    parsed = parse_boreholes_from_files()
+    seen_codes: set[str] = set()
+    total_layers = 0
+
+    for item in parsed:
+        longitude = item['longitude']
+        latitude = item['latitude']
+        geom = Point(longitude, latitude, srid=4326) if not (longitude == 0 and latitude == 0) else None
+        borehole, _ = Borehole.objects.update_or_create(
+            borehole_code=item['borehole_code'],
+            defaults={
+                'name': item['name'],
+                'longitude': longitude,
+                'latitude': latitude,
+                'elevation': item['elevation'],
+                'depth_total': item['depth_total'],
+                'workface_name': item['workface_name'],
+                'remark': item['remark'],
+                'geom': geom,
+            },
+        )
+
+        borehole.layers.all().delete()
+        layers = [
+            BoreholeLayer(
+                borehole=borehole,
+                layer_name=layer['layer_name'],
+                top_depth=layer['top_depth'],
+                thickness=layer['thickness'],
+                bottom_depth=layer['bottom_depth'],
+                color=layer['color'],
+                sort_order=layer['sort_order'],
+            )
+            for layer in item['layers']
+        ]
+        BoreholeLayer.objects.bulk_create(layers)
+        total_layers += len(layers)
+        seen_codes.add(item['borehole_code'])
+
+    if remove_missing:
+        Borehole.objects.exclude(borehole_code__in=seen_codes).delete()
+
+    return {'boreholes': len(parsed), 'layers': total_layers}
+
+
+def serialize_queryset(queryset) -> list[dict[str, Any]]:
+    """序列化钻孔查询集。"""
+    return BoreholeSerializer(queryset, many=True).data
+
+
+def load_boreholes() -> list[dict[str, Any]]:
+    """读取数据库中的全部钻孔数据。"""
+    queryset = Borehole.objects.prefetch_related('layers').all()
+    return serialize_queryset(queryset)
 
 
 def get_borehole_list(keyword: str | None = None, workface: str | None = None) -> list[dict[str, Any]]:
     """按条件返回钻孔列表。"""
-    boreholes = load_boreholes()
+    queryset = Borehole.objects.prefetch_related('layers').all()
     if keyword:
-        boreholes = [item for item in boreholes if keyword.lower() in item['name'].lower()]
+        queryset = queryset.filter(name__icontains=keyword)
     if workface:
-        boreholes = [item for item in boreholes if item['workface_name'] == workface]
-    return boreholes
+        queryset = queryset.filter(workface_name=workface)
+    return serialize_queryset(queryset)
 
 
 def get_borehole_detail(borehole_id: str) -> dict[str, Any] | None:
     """按编号返回单个钻孔详情。"""
-    return next((item for item in load_boreholes() if item['id'] == str(borehole_id)), None)
+    borehole = Borehole.objects.prefetch_related('layers').filter(id=borehole_id).first()
+    if not borehole:
+        return None
+    return BoreholeSerializer(borehole).data
 
 
 def get_borehole_layers(borehole_id: str) -> list[dict[str, Any]]:
@@ -254,18 +339,18 @@ def get_borehole_layers(borehole_id: str) -> list[dict[str, Any]]:
 def get_borehole_geojson() -> dict[str, Any]:
     """返回钻孔 GeoJSON 点集。"""
     features = []
-    for item in load_boreholes():
-        if item['longitude'] == 0 and item['latitude'] == 0:
+    for item in Borehole.objects.all():
+        if item.longitude == 0 and item.latitude == 0:
             continue
         features.append({
             'type': 'Feature',
-            'geometry': {'type': 'Point', 'coordinates': [item['longitude'], item['latitude'], item['elevation']]},
+            'geometry': {'type': 'Point', 'coordinates': [item.longitude, item.latitude, item.elevation]},
             'properties': {
-                'id': item['id'],
-                'borehole_code': item['borehole_code'],
-                'name': item['name'],
-                'depth_total': item['depth_total'],
-                'workface_name': item['workface_name'],
+                'id': str(item.id),
+                'borehole_code': item.borehole_code,
+                'name': item.name,
+                'depth_total': item.depth_total,
+                'workface_name': item.workface_name,
             },
         })
     return {'type': 'FeatureCollection', 'features': features}
