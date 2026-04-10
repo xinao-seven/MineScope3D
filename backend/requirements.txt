@@ -1,0 +1,7 @@
+Django>=5.2
+djangorestframework>=3.16
+django-cors-headers>=4.7
+openpyxl>=3.1
+pyproj>=3.7
+pyshp>=2.3
+Pillow>=11.0
