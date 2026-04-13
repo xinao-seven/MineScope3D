@@ -2,6 +2,7 @@
 import {
     Cartesian2,
     Color,
+    Cesium3DTileset,
     Entity,
     ImageryLayer,
     JulianDate,
@@ -10,16 +11,18 @@ import {
     Viewer,
     defined,
 } from 'cesium'
-import { onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { CameraManager } from '../../cesium/core/CameraManager'
 import { degreesArrayToCartesianArray } from '../../cesium/core/coordinateTransform'
 import { ViewerManager } from '../../cesium/core/ViewerManager'
 import type { BasemapKey } from '../../cesium/constants'
+import { TilesetLoader } from '../../cesium/loaders/TilesetLoader'
 import { EntityManager } from '../../cesium/managers/EntityManager'
 import { InteractionManager } from '../../cesium/managers/InteractionManager'
 import { LayerManager } from '../../cesium/managers/LayerManager'
 import { ImageryLayerLoader } from '../../cesium/loaders/ImageryLayerLoader'
 import { MeasureTool } from '../../cesium/tools/MeasureTool'
+import { fetchTilesets, type TilesetEntry } from '../../api/tilesets'
 import { useDashboardStore } from '../../store/dashboard'
 import type { Borehole, BoundaryRegion, LayerKey, RasterLayer } from '../../types/dashboard'
 
@@ -31,7 +34,11 @@ const mapToolState = reactive({
     measuring: false,
     measureResult: '',
     showLayerModel: true,
+    tilesetLoading: false,
+    tilesetLoaded: false,
+    tilesetResult: '',
 })
+const mapToolResult = computed(() => mapToolState.measureResult || mapToolState.tilesetResult)
 
 const basemapOptions = [
     { key: 'geo' as BasemapKey, name: '地理' },
@@ -46,8 +53,11 @@ let entityManager: EntityManager | null = null
 let interactionManager: InteractionManager | null = null
 let layerManager: LayerManager | null = null
 let imageryLayerLoader: ImageryLayerLoader | null = null
+let tilesetLoader: TilesetLoader | null = null
 let measureTool: MeasureTool | null = null
 let rasterLayer: ImageryLayer | null = null
+const mineTilesetMap = new Map<string, Cesium3DTileset>()
+let mineTilesetEntries: TilesetEntry[] = []
 let hasAutoFlownToMine = false
 const boreholeEntities = new Map<string, Entity>()
 const boreholeLayerEntities = new Map<string, Entity[]>()
@@ -66,6 +76,7 @@ function mountScene() {
     interactionManager = new InteractionManager(viewer)
     layerManager = new LayerManager(viewer)
     imageryLayerLoader = new ImageryLayerLoader(viewer)
+    tilesetLoader = new TilesetLoader(viewer)
     measureTool = new MeasureTool(viewer)
 
     switchBasemap('geo')
@@ -513,8 +524,81 @@ function clearMeasureResult() {
     mapToolState.measureResult = ''
 }
 
+/** 加载矿区 3D Tiles 模型，并自动飞行定位。 */
+async function loadMineTilesetAndLocate() {
+    if (!tilesetLoader || mapToolState.tilesetLoading) {
+        return
+    }
+
+    mapToolState.tilesetLoading = true
+    mapToolState.tilesetResult = '3D 模型加载中...'
+    try {
+        if (mineTilesetEntries.length === 0) {
+            mineTilesetEntries = await fetchTilesets()
+            if (mineTilesetEntries.length === 0) {
+                mapToolState.tilesetResult = '未找到可用 3D 模型'
+                return
+            }
+        }
+
+        let failedCount = 0
+        let newlyLoadedCount = 0
+
+        for (const entry of mineTilesetEntries) {
+            const tilesetKey = entry.id || entry.url
+            const currentTileset = mineTilesetMap.get(tilesetKey)
+            if (currentTileset && !currentTileset.isDestroyed()) {
+                continue
+            }
+
+            try {
+                const tileset = await tilesetLoader.loadFromUrl(entry.url)
+                mineTilesetMap.set(tilesetKey, tileset)
+                newlyLoadedCount += 1
+            } catch (error) {
+                failedCount += 1
+                console.error('[MineScope3D] 3D Tiles 模型加载失败', { id: entry.id, url: entry.url, error })
+            }
+        }
+
+        const activeTilesets = Array.from(mineTilesetMap.values()).filter((item) => !item.isDestroyed())
+        if (activeTilesets.length === 0) {
+            mapToolState.tilesetLoaded = false
+            mapToolState.tilesetResult = '3D 模型加载失败，请检查 tileset 路径'
+            return
+        }
+
+        mapToolState.tilesetLoaded = true
+        await tilesetLoader.flyTo(activeTilesets[0], 1.2)
+
+        if (failedCount > 0) {
+            mapToolState.tilesetResult = `已加载 ${activeTilesets.length} 个模型，${failedCount} 个失败`
+            return
+        }
+        if (newlyLoadedCount > 0) {
+            mapToolState.tilesetResult = `已加载 ${activeTilesets.length} 个 3D 模型并定位`
+            return
+        }
+        mapToolState.tilesetResult = `已定位 ${activeTilesets.length} 个 3D 模型`
+    } catch (error) {
+        console.error('[MineScope3D] 3D Tiles 模型加载失败', { error })
+        mapToolState.tilesetResult = '3D 模型加载失败，请检查 tileset 路径'
+    } finally {
+        mapToolState.tilesetLoading = false
+    }
+}
+
 /** 销毁 Cesium 场景和事件处理器。 */
 function destroyScene() {
+    if (tilesetLoader) {
+        for (const tileset of mineTilesetMap.values()) {
+            if (!tileset.isDestroyed()) {
+                tilesetLoader.remove(tileset)
+            }
+        }
+    }
+    mineTilesetMap.clear()
+    mineTilesetEntries = []
     measureTool?.destroy()
     interactionManager?.destroy()
     viewerManager?.destroy()
@@ -525,6 +609,7 @@ function destroyScene() {
     interactionManager = null
     layerManager = null
     imageryLayerLoader = null
+    tilesetLoader = null
     measureTool = null
 }
 
@@ -552,17 +637,14 @@ defineExpose({ flyToBorehole, flyToBoundary, flyToLayer })
                 {{ mapToolState.measuring ? '结束测距' : '测距' }}
             </button>
             <button type="button" @click="clearMeasureResult">清除测量</button>
+            <button type="button" :disabled="mapToolState.tilesetLoading" @click="loadMineTilesetAndLocate">
+                {{ mapToolState.tilesetLoading ? '模型加载中...' : (mapToolState.tilesetLoaded ? '定位全部模型' : '加载全部模型') }}
+            </button>
             <label>
                 <input v-model="mapToolState.showLayerModel" type="checkbox">
                 分层模型
             </label>
-            <span v-if="mapToolState.measureResult">{{ mapToolState.measureResult }}</span>
-        </div>
-        <div class="map-reticle"></div>
-        <div class="map-status">
-            <span>WGS84</span>
-            <strong>锦界矿区三维场景</strong>
-            <span>钻孔 / SHP / TIFF</span>
+            <span v-if="mapToolResult">{{ mapToolResult }}</span>
         </div>
         <div v-show="tooltip.visible" class="map-tooltip" :style="{ left: `${tooltip.x}px`, top: `${tooltip.y}px` }">
             {{ tooltip.text }}
@@ -661,6 +743,11 @@ defineExpose({ flyToBorehole, flyToBoundary, flyToLayer })
     border-color: rgba(35, 209, 139, 0.78);
     background: rgba(35, 209, 139, 0.18);
     color: #ffffff;
+}
+
+.map-tools button:disabled {
+    cursor: not-allowed;
+    opacity: 0.7;
 }
 
 .map-tools label {

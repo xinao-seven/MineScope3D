@@ -1,8 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import BoreholeChart from '../components/charts/BoreholeChart.vue'
-import DepthDistributionChart from '../components/charts/DepthDistributionChart.vue'
-import WorkfaceChart from '../components/charts/WorkfaceChart.vue'
 import CesiumMap from '../components/map/CesiumMap.vue'
 import BoreholeList from '../components/panels/BoreholeList.vue'
 import LayerControl from '../components/panels/LayerControl.vue'
@@ -52,27 +50,9 @@ function handleLocateBorehole(id: string) {
   mapRef.value?.flyToBorehole(id)
 }
 
-/** 响应工作面图表点击并定位代表钻孔。 */
-function handleWorkfaceClick(name: string) {
-  const boundary = store.boundaries.find((item) => item.name === name)
-  if (boundary) {
-    mapRef.value?.flyToBoundary(boundary.id)
-    return
-  }
-  store.selectFirstBoreholeByWorkface(name)
-  if (selectedBoreholeId.value) {
-    mapRef.value?.flyToBorehole(selectedBoreholeId.value)
-  }
-}
-
 /** 响应分层图点击并保留后续地图筛选入口。 */
 function handleLayerSegmentClick(name: string) {
   console.info(`[MineScope3D] 预留按岩层筛选地图入口：${name}`)
-}
-
-/** 响应深度区间点击并保留后续地图筛选入口。 */
-function handleDepthClick(name: string) {
-  console.info(`[MineScope3D] 预留按深度区间筛选地图入口：${name}`)
 }
 
 /** 切换左侧面板伸缩状态。 */
@@ -152,20 +132,6 @@ onMounted(loadDashboard)
       </aside>
     </section>
 
-    <footer class="bottom-analytics">
-      <section>
-        <h2>工作面钻孔数量</h2>
-        <div class="chart-box">
-          <WorkfaceChart :data="store.workfaceBoreholes" @workface-click="handleWorkfaceClick" />
-        </div>
-      </section>
-      <section>
-        <h2>钻孔深度分布</h2>
-        <div class="chart-box">
-          <DepthDistributionChart :data="store.depthDistribution" @depth-click="handleDepthClick" />
-        </div>
-      </section>
-    </footer>
   </main>
 </template>
 
@@ -332,35 +298,6 @@ onMounted(loadDashboard)
   height: 188px;
 }
 
-.bottom-analytics {
-  position: absolute;
-  z-index: 5;
-  left: 342px;
-  right: 372px;
-  bottom: 20px;
-  height: 138px;
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 10px;
-}
-
-.bottom-analytics section {
-  min-width: 0;
-  padding: 9px 11px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--panel);
-  box-shadow: var(--shadow);
-}
-
-.bottom-analytics h2 {
-  margin: 0 0 3px;
-  color: #f5fbff;
-  font-size: 15px;
-  font-weight: 700;
-  letter-spacing: 0;
-}
-
 @media (max-width: 1500px) {
   .dashboard-screen {
     width: 1500px;
@@ -376,11 +313,6 @@ onMounted(loadDashboard)
 
   .side-panel--right {
     width: 330px;
-  }
-
-  .bottom-analytics {
-    left: 324px;
-    right: 354px;
   }
 }
 </style>
