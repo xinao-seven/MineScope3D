@@ -27,3 +27,4 @@ cesium-standalone-reference
 .env
 .env.*
 !.env.example
+backend/static/*
