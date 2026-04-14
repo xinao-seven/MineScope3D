@@ -6,9 +6,10 @@ import struct
 
 from pyproj import CRS, Transformer
 
-from config import DATA_DIR
+from config import DATA_DIR, STATIC_DIR
 
 TIF_DIR = DATA_DIR / 'tif'
+TIF_PREVIEW_DIR = STATIC_DIR / 'tif-previews'
 MINE_PRJ_FILE = DATA_DIR / 'shp' / '锦界矿边界.prj'
 FALLBACK_SOURCE_CRS = ('EPSG:4326', 'EPSG:32649', 'EPSG:32648', 'EPSG:4547', 'EPSG:4548')
 
@@ -148,6 +149,13 @@ def build_legend() -> list[dict[str, str]]:
     ]
 
 
+def build_preview_url(raster_id: str) -> str | None:
+    preview_file = TIF_PREVIEW_DIR / f'{raster_id}.png'
+    if preview_file.exists():
+        return f'/static/tif-previews/{preview_file.name}'
+    return None
+
+
 def build_raster_item(tif_path: Path) -> dict[str, Any] | None:
     tfw_path = tif_path.with_suffix('.tfw')
     if not tfw_path.exists():
@@ -160,6 +168,7 @@ def build_raster_item(tif_path: Path) -> dict[str, Any] | None:
         'name': tif_path.stem,
         'type': 'subsidence',
         'url': f'/api/rasters/files/{raster_id}/',
+        'preview_url': build_preview_url(raster_id),
         'bounds': bounds,
         'opacity': 0.62,
         'legend_config': build_legend(),

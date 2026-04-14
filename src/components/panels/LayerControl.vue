@@ -16,9 +16,21 @@ function handleLayerToggle(layer: LayerState, visible: string | number | boolean
 	emit('toggleLayer', layer.key, Boolean(visible))
 }
 
+/** 处理可见性开关原生事件。 */
+function handleLayerToggleEvent(layer: LayerState, event: Event) {
+	const target = event.target as HTMLInputElement | null
+	handleLayerToggle(layer, target?.checked ?? false)
+}
+
 /** 修改图层透明度。 */
 function handleOpacityChange(layer: LayerState, opacity: number) {
 	emit('opacityChange', layer.key, opacity)
+}
+
+/** 处理透明度滑条原生事件。 */
+function handleOpacityInput(layer: LayerState, event: Event) {
+	const target = event.target as HTMLInputElement | null
+	handleOpacityChange(layer, Number(target?.value ?? layer.opacity))
 }
 
 /** 通知地图定位到指定图层范围。 */
@@ -35,16 +47,17 @@ function handleLocateLayer(layer: LayerState) {
 					<strong>{{ layer.name }}</strong>
 					<span>{{ layer.description }}</span>
 				</div>
-				<el-switch :model-value="layer.visible" active-color="#23d18b" inactive-color="#3b4543"
-					@change="handleLayerToggle(layer, $event)" />
+				<label class="layer-switch" :aria-label="`${layer.name}显示状态`">
+					<input type="checkbox" :checked="layer.visible" @change="handleLayerToggleEvent(layer, $event)">
+					<span></span>
+				</label>
 			</div>
 			<div class="layer-row__tools">
 				<small>{{ layer.count }} 项</small>
 				<button type="button" @click="handleLocateLayer(layer)">定位</button>
 			</div>
-			<el-slider v-if="layer.key === 'raster' || layer.key.includes('Boundary')" :model-value="layer.opacity"
-				:min="0.1" :max="1" :step="0.02" :show-tooltip="false"
-				@input="handleOpacityChange(layer, Number($event))" />
+			<input v-if="layer.key === 'raster' || layer.key.includes('Boundary')" class="layer-opacity" type="range"
+				min="0.1" max="1" step="0.02" :value="layer.opacity" @input="handleOpacityInput(layer, $event)">
 		</article>
 	</div>
 </template>
@@ -101,13 +114,54 @@ function handleLocateLayer(layer: LayerState) {
 	color: var(--text);
 }
 
-:deep(.el-slider) {
-	--el-slider-main-bg-color: var(--green);
-	--el-slider-runway-bg-color: rgba(96, 165, 250, 0.2);
-	--el-slider-button-size: 14px;
+.layer-switch {
+	position: relative;
+	width: 40px;
+	height: 22px;
+	display: inline-flex;
+	align-items: center;
 }
 
-:deep(.el-switch) {
-	--el-switch-border-color: rgba(125, 211, 252, 0.32);
+.layer-switch input {
+	position: absolute;
+	inset: 0;
+	opacity: 0;
+	margin: 0;
+	cursor: pointer;
+}
+
+.layer-switch span {
+	position: absolute;
+	inset: 0;
+	border-radius: 999px;
+	background: rgba(59, 69, 67, 0.82);
+	border: 1px solid rgba(125, 211, 252, 0.34);
+	transition: background 0.2s ease;
+}
+
+.layer-switch span::after {
+	content: '';
+	position: absolute;
+	top: 2px;
+	left: 2px;
+	width: 16px;
+	height: 16px;
+	border-radius: 50%;
+	background: #f5fbff;
+	transition: transform 0.2s ease;
+}
+
+.layer-switch input:checked + span {
+	background: rgba(35, 209, 139, 0.82);
+}
+
+.layer-switch input:checked + span::after {
+	transform: translateX(18px);
+}
+
+.layer-opacity {
+	width: 100%;
+	margin-top: 8px;
+	accent-color: #23d18b;
 }
 </style>

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import 'cesium/Build/Cesium/Widgets/widgets.css'
 import {
     Cartesian2,
     Color,
@@ -278,11 +279,31 @@ async function addRasterLayer(raster: RasterLayer | null) {
         north: raster.bounds.north,
     }
 
+    const previewUrl = raster.preview_url?.trim()
+
     try {
-        rasterLayer = await imageryLayerLoader.addGeoTiffSingleTile(raster.url, bounds)
+        rasterLayer = previewUrl
+            ? await imageryLayerLoader.addSingleTile(previewUrl, bounds)
+            : await imageryLayerLoader.addGeoTiffSingleTile(raster.url, bounds)
         rasterLayer.alpha = store.getLayerState('raster')?.opacity ?? raster.opacity
         rasterLayer.show = store.getLayerState('raster')?.visible ?? true
     } catch (error) {
+        if (previewUrl) {
+            try {
+                rasterLayer = await imageryLayerLoader.addGeoTiffSingleTile(raster.url, bounds)
+                rasterLayer.alpha = store.getLayerState('raster')?.opacity ?? raster.opacity
+                rasterLayer.show = store.getLayerState('raster')?.visible ?? true
+                return
+            } catch (fallbackError) {
+                console.error('[MineScope3D] 栅格预览与 TIFF 回退加载均失败', {
+                    rasterId: raster.id,
+                    previewUrl,
+                    rasterUrl: raster.url,
+                    fallbackError,
+                })
+                return
+            }
+        }
         console.error('[MineScope3D] TIFF 栅格加载失败', { rasterId: raster.id, url: raster.url, error })
     }
 }

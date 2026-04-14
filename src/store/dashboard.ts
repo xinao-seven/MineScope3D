@@ -1,5 +1,13 @@
 import { defineStore } from 'pinia'
-import { fetchDashboardPayload } from '../api/dashboard'
+import {
+  fetchBoreholes,
+  fetchBoundaries,
+  fetchDepthDistribution,
+  fetchLayerDistribution,
+  fetchOverview,
+  fetchRasters,
+  fetchWorkfaceBoreholes,
+} from '../api/dashboard'
 import type {
   Borehole,
   BoundaryRegion,
@@ -67,18 +75,37 @@ export const useDashboardStore = defineStore('dashboard', {
     async loadDashboardData() {
       this.loading = true
       try {
-        const payload = await fetchDashboardPayload()
-        this.overview = payload.overview
-        this.boreholes = payload.boreholes
-        this.boundaries = payload.boundaries
-        this.rasters = payload.rasters
-        this.layerDistribution = payload.layerDistribution
-        this.workfaceBoreholes = payload.workfaceBoreholes
-        this.depthDistribution = payload.depthDistribution
+        const [overview, boreholes, boundaries, rasters] = await Promise.all([
+          fetchOverview(),
+          fetchBoreholes(),
+          fetchBoundaries(),
+          fetchRasters(),
+        ])
+
+        this.overview = overview
+        this.boreholes = boreholes
+        this.boundaries = boundaries
+        this.rasters = rasters
         this.refreshLayerCounts()
         this.selectBorehole(this.boreholes[0]?.id)
+        void this.loadChartData()
       } finally {
         this.loading = false
+      }
+    },
+    /** 异步补齐图表数据，避免阻塞首屏。 */
+    async loadChartData() {
+      try {
+        const [layerDistribution, workfaceBoreholes, depthDistribution] = await Promise.all([
+          fetchLayerDistribution(),
+          fetchWorkfaceBoreholes(),
+          fetchDepthDistribution(),
+        ])
+        this.layerDistribution = layerDistribution
+        this.workfaceBoreholes = workfaceBoreholes
+        this.depthDistribution = depthDistribution
+      } catch (error) {
+        console.warn('[MineScope3D] 图表数据加载失败', error)
       }
     },
     /** 刷新图层面板中的数量统计。 */

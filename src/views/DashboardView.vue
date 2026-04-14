@@ -1,7 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
-import BoreholeChart from '../components/charts/BoreholeChart.vue'
-import CesiumMap from '../components/map/CesiumMap.vue'
+import { computed, defineAsyncComponent, onMounted, ref } from 'vue'
 import BoreholeList from '../components/panels/BoreholeList.vue'
 import LayerControl from '../components/panels/LayerControl.vue'
 import LegendPanel from '../components/panels/LegendPanel.vue'
@@ -11,10 +9,20 @@ import PanelBlock from '../components/panels/PanelBlock.vue'
 import { useDashboardStore } from '../store/dashboard'
 import type { Borehole, LayerKey } from '../types/dashboard'
 
+const CesiumMap = defineAsyncComponent(() => import('../components/map/CesiumMap.vue'))
+const BoreholeChart = defineAsyncComponent(() => import('../components/charts/BoreholeChart.vue'))
+
+interface MapExpose {
+  flyToLayer: (key: LayerKey) => void
+  flyToBorehole: (id: string) => void
+}
+
 const store = useDashboardStore()
-const mapRef = ref<InstanceType<typeof CesiumMap> | null>(null)
+const mapRef = ref<MapExpose | null>(null)
 const isLeftPanelCollapsed = ref(false)
 const isRightPanelCollapsed = ref(false)
+const shouldMountMap = ref(false)
+const shouldMountCharts = ref(false)
 const selectedBoreholeId = computed(getSelectedBoreholeId)
 
 /** 加载大屏初始化数据。 */
@@ -65,7 +73,39 @@ function toggleRightPanel() {
   isRightPanelCollapsed.value = !isRightPanelCollapsed.value
 }
 
-onMounted(loadDashboard)
+/** 延后挂载地图，降低首帧阻塞。 */
+function scheduleMapMount() {
+  const mount = () => {
+    shouldMountMap.value = true
+  }
+
+  if (typeof window.requestIdleCallback === 'function') {
+    window.requestIdleCallback(mount, { timeout: 700 })
+    return
+  }
+
+  window.setTimeout(mount, 120)
+}
+
+/** 延后挂载图表，避开首屏关键链路。 */
+function scheduleChartsMount() {
+  const mount = () => {
+    shouldMountCharts.value = true
+  }
+
+  if (typeof window.requestIdleCallback === 'function') {
+    window.requestIdleCallback(mount, { timeout: 1200 })
+    return
+  }
+
+  window.setTimeout(mount, 360)
+}
+
+onMounted(() => {
+  void loadDashboard()
+  scheduleMapMount()
+  scheduleChartsMount()
+})
 </script>
 
 <template>
@@ -109,7 +149,8 @@ onMounted(loadDashboard)
       </aside>
 
       <section class="map-stage">
-        <CesiumMap ref="mapRef" />
+        <CesiumMap v-if="shouldMountMap" ref="mapRef" />
+        <div v-else class="map-stage__placeholder">地图引擎加载中...</div>
       </section>
 
       <aside class="side-panel side-panel--right" :class="{ 'is-collapsed': isRightPanelCollapsed }">
@@ -122,7 +163,8 @@ onMounted(loadDashboard)
 
         <PanelBlock title="分层类型占比" subtitle="ECharts">
           <div class="chart-box chart-box--pie">
-            <BoreholeChart :data="store.layerDistribution" @segment-click="handleLayerSegmentClick" />
+            <BoreholeChart v-if="shouldMountCharts" :data="store.layerDistribution" @segment-click="handleLayerSegmentClick" />
+            <div v-else class="chart-placeholder">图表加载中...</div>
           </div>
         </PanelBlock>
 
@@ -289,6 +331,20 @@ onMounted(loadDashboard)
   background: #020716;
 }
 
+.map-stage__placeholder {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+  letter-spacing: 0.5px;
+  background:
+    radial-gradient(circle at 68% 12%, rgba(56, 189, 248, 0.12), transparent 30%),
+    radial-gradient(circle at 24% 76%, rgba(35, 209, 139, 0.12), transparent 35%),
+    #020716;
+}
+
 .chart-box {
   height: 100px;
   min-height: 0;
@@ -296,6 +352,18 @@ onMounted(loadDashboard)
 
 .chart-box--pie {
   height: 188px;
+}
+
+.chart-placeholder {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+  border: 1px dashed rgba(125, 211, 252, 0.24);
+  border-radius: 8px;
+  background: rgba(5, 19, 48, 0.32);
 }
 
 @media (max-width: 1500px) {

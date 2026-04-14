@@ -56,6 +56,7 @@ export interface RasterLayer {
   name: string
   type: string
   url: string
+  preview_url?: string
   bounds: RasterBounds
   opacity: number
   legend_config: RasterLegendItem[]

@@ -156,6 +156,7 @@ export const mockRasters: RasterLayer[] = [
     name: 'InSAR 沉降专题图',
     type: 'subsidence',
     url: '',
+    preview_url: '/static/tif-previews/20260211.png',
     bounds: { west: 110.188, south: 39.244, east: 110.311, north: 39.326 },
     opacity: 0.62,
     legend_config: [

@@ -1,5 +1,4 @@
 <script setup lang="ts">
-import * as echarts from 'echarts'
 import type { ECharts, EChartsOption } from 'echarts'
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
@@ -13,13 +12,26 @@ const emit = defineEmits<{
 
 const chartRef = ref<HTMLDivElement | null>(null)
 let chart: ECharts | null = null
+let echartsLib: typeof import('echarts') | null = null
 
 /** 初始化图表实例并绑定事件。 */
-function mountChart() {
+async function mountChart() {
   if (!chartRef.value) {
     return
   }
-  chart = echarts.init(chartRef.value, 'dark')
+
+  try {
+    echartsLib ??= await import('echarts')
+  } catch (error) {
+    console.error('[MineScope3D] 图表依赖加载失败', error)
+    return
+  }
+
+  if (!chartRef.value || !echartsLib) {
+    return
+  }
+
+  chart = echartsLib.init(chartRef.value, 'dark')
   chart.on('click', handleChartClick)
   renderChart()
   window.addEventListener('resize', resizeChart)
@@ -55,7 +67,9 @@ function disposeChart() {
 }
 
 watch(() => props.option, handleOptionChange, { deep: true })
-onMounted(mountChart)
+onMounted(() => {
+  void mountChart()
+})
 onBeforeUnmount(disposeChart)
 </script>
 
