@@ -4,11 +4,11 @@ import cesium from 'vite-plugin-cesium'
 
 // https://vite.dev/config/
 export default defineConfig({
-  plugins: [vue(), cesium()],
-  server: {
-    proxy: {
-      '/api': 'http://127.0.0.1:8000',
-      '/static': 'http://127.0.0.1:8000',
+    plugins: [vue(), cesium()],
+    server: {
+        proxy: {
+            '/api': 'http://127.0.0.1:8000',
+            '/static': 'http://127.0.0.1:8000',
+        },
     },
-  },
 })

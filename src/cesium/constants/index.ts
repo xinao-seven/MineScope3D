@@ -6,26 +6,26 @@ export type BasemapKey = 'geo' | 'image' | 'osm'
 export type ViewerConstructorOptions = NonNullable<ConstructorParameters<typeof Viewer>[1]>
 
 export const DEFAULT_VIEWER_OPTIONS: ViewerConstructorOptions = {
-  animation: false,
-  timeline: false,
-  geocoder: false,
-  homeButton: false,
-  navigationHelpButton: false,
-  sceneModePicker: false,
-  baseLayerPicker: true,
-  fullscreenButton: false,
-  infoBox: false,
-  selectionIndicator: false,
-  shouldAnimate: true,
+    animation: false,
+    timeline: false,
+    geocoder: false,
+    homeButton: false,
+    navigationHelpButton: false,
+    sceneModePicker: false,
+    baseLayerPicker: true,
+    fullscreenButton: false,
+    infoBox: false,
+    selectionIndicator: false,
+    shouldAnimate: true,
 }
 
 export const DEFAULT_SCENE_CONFIG = {
-  backgroundColor: '#020716',
-  globeBaseColor: '#071933',
-  depthTestAgainstTerrain: false,
-  globeLighting: false,
-  fogEnabled: true,
-  fogDensity: 0.00045,
+    backgroundColor: '#020716',
+    globeBaseColor: '#071933',
+    depthTestAgainstTerrain: false,
+    globeLighting: false,
+    fogEnabled: true,
+    fogDensity: 0.00045,
 }
 
 export const DEFAULT_GLOBE_DEPTH_TEST = DEFAULT_SCENE_CONFIG.depthTestAgainstTerrain
@@ -38,9 +38,9 @@ export const DEFAULT_CAMERA_PITCH = CesiumMath.toRadians(-35)
 export const DEFAULT_CAMERA_ROLL = 0
 
 export const DEFAULT_CAMERA_OFFSET = new HeadingPitchRange(
-  DEFAULT_CAMERA_HEADING,
-  DEFAULT_CAMERA_PITCH,
-  2500,
+    DEFAULT_CAMERA_HEADING,
+    DEFAULT_CAMERA_PITCH,
+    2500,
 )
 
 export const DEFAULT_POINT_PIXEL_SIZE = 8
@@ -49,15 +49,15 @@ export const DEFAULT_MEASURE_LABEL_FONT = '14px Microsoft YaHei'
 export const DEFAULT_PICK_DISTANCE = Number.POSITIVE_INFINITY
 
 export const BASEMAP_CONFIG: Record<BasemapKey, { url: string; credit?: string }> = {
-  geo: {
-    url: 'https://services.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}',
-    credit: 'Esri World Topographic Map',
-  },
-  image: {
-    url: 'https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
-    credit: 'Esri World Imagery',
-  },
-  osm: {
-    url: 'https://tile.openstreetmap.org/',
-  },
+    geo: {
+        url: 'https://services.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}',
+        credit: 'Esri World Topographic Map',
+    },
+    image: {
+        url: 'https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+        credit: 'Esri World Imagery',
+    },
+    osm: {
+        url: 'https://tile.openstreetmap.org/',
+    },
 }
