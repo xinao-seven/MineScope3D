@@ -48,10 +48,18 @@ export const DEFAULT_LABEL_FONT = '12px Microsoft YaHei'
 export const DEFAULT_MEASURE_LABEL_FONT = '14px Microsoft YaHei'
 export const DEFAULT_PICK_DISTANCE = Number.POSITIVE_INFINITY
 
-export const BASEMAP_CONFIG: Record<BasemapKey, { url: string; credit?: string }> = {
+export interface BasemapConfigItem {
+    url: string
+    credit?: string
+    subdomains?: string[]
+}
+
+export const BASEMAP_CONFIG: Record<BasemapKey, BasemapConfigItem> = {
     geo: {
-        url: 'https://services.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}',
-        credit: 'Esri World Topographic Map',
+        // 国内网络下 ArcGIS 矢量底图容易连接失败，这里改为高德矢量瓦片。
+        url: 'https://webrd0{s}.is.autonavi.com/appmaptile?style=7&x={x}&y={y}&z={z}',
+        subdomains: ['1', '2', '3', '4'],
+        credit: 'Amap Vector',
     },
     image: {
         url: 'https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',

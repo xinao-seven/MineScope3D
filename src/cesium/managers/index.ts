@@ -1,4 +1,5 @@
 export * from './EntityManager'
+export * from './AnnotationManager'
 export * from './DataSourceManager'
 export * from './InteractionManager'
 export * from './LayerManager'

@@ -96,6 +96,7 @@ export class ViewerManager {
         return new UrlTemplateImageryProvider({
             url: config.url,
             credit: config.credit,
+            subdomains: config.subdomains,
         })
     }
 }

@@ -19,6 +19,7 @@ import { ViewerManager } from '../../cesium/core/ViewerManager'
 import type { BasemapKey } from '../../cesium/constants'
 import { TilesetLoader } from '../../cesium/loaders/TilesetLoader'
 import { EntityManager } from '../../cesium/managers/EntityManager'
+import { AnnotationManager } from '../../cesium/managers/AnnotationManager'
 import { InteractionManager } from '../../cesium/managers/InteractionManager'
 import { LayerManager } from '../../cesium/managers/LayerManager'
 import { ImageryLayerLoader } from '../../cesium/loaders/ImageryLayerLoader'
@@ -38,8 +39,10 @@ const mapToolState = reactive({
     tilesetLoading: false,
     tilesetLoaded: false,
     tilesetResult: '',
+    annotating: false,
+    annotationResult: '',
 })
-const mapToolResult = computed(() => mapToolState.measureResult || mapToolState.tilesetResult)
+const mapToolResult = computed(() => mapToolState.measureResult || mapToolState.tilesetResult || mapToolState.annotationResult)
 
 const basemapOptions = [
     { key: 'geo' as BasemapKey, name: '地理' },
@@ -51,6 +54,7 @@ let viewer: Viewer | null = null
 let viewerManager: ViewerManager | null = null
 let cameraManager: CameraManager | null = null
 let entityManager: EntityManager | null = null
+let annotationManager: AnnotationManager | null = null
 let interactionManager: InteractionManager | null = null
 let layerManager: LayerManager | null = null
 let imageryLayerLoader: ImageryLayerLoader | null = null
@@ -74,13 +78,14 @@ function mountScene() {
     viewer = viewerManager.viewer
     cameraManager = new CameraManager(viewer)
     entityManager = new EntityManager(viewer)
+    annotationManager = new AnnotationManager(viewer, entityManager)
     interactionManager = new InteractionManager(viewer)
     layerManager = new LayerManager(viewer)
     imageryLayerLoader = new ImageryLayerLoader(viewer)
     tilesetLoader = new TilesetLoader(viewer)
     measureTool = new MeasureTool(viewer)
 
-    switchBasemap('geo')
+    switchBasemap('image')
     bindMapInteractions()
     reloadSceneData()
 }
@@ -120,7 +125,74 @@ function reloadSceneData() {
     addBoundaries(store.boundaries)
     addRasterLayer(store.activeRaster)
     syncLayerVisibility()
+    annotationManager?.restoreEntities()
     flyToMineOnce()
+}
+
+/** 切换点击标注模式。 */
+function toggleAnnotationMode() {
+    mapToolState.annotating = !mapToolState.annotating
+    if (mapToolState.annotating) {
+        stopDistanceMeasure()
+        mapToolState.annotationResult = '标注中：左键点击地图添加标注，名称由弹窗输入'
+        return
+    }
+    if (!mapToolState.annotationResult) {
+        mapToolState.annotationResult = '标注已停止'
+    }
+}
+
+/** 清空全部点击标注。 */
+function clearAnnotations() {
+    annotationManager?.clearAll()
+    mapToolState.annotationResult = '已清空标注'
+}
+
+/** 删除选中的标注。 */
+function deleteSelectedAnnotation() {
+    const selected = annotationManager?.getSelected() ?? null
+    if (!selected) {
+        mapToolState.annotationResult = '请先点击一个标注后再删除'
+        return
+    }
+
+    const confirmed = window.confirm(`确认删除标注“${selected.name}”吗？`)
+    if (!confirmed) {
+        return
+    }
+
+    const deleted = annotationManager?.deleteSelected() ?? null
+    if (!deleted) {
+        mapToolState.annotationResult = '删除失败：未找到选中标注'
+        return
+    }
+    mapToolState.annotationResult = `已删除 ${deleted.name}`
+}
+
+/** 重命名选中的标注。 */
+function renameSelectedAnnotation() {
+    const selected = annotationManager?.getSelected() ?? null
+    if (!selected) {
+        mapToolState.annotationResult = '请先点击一个标注后再重命名'
+        return
+    }
+
+    const input = window.prompt('请输入新的标注名称', selected.name)
+    if (input === null) {
+        return
+    }
+    const name = input.trim()
+    if (!name) {
+        mapToolState.annotationResult = '标注名称不能为空'
+        return
+    }
+
+    const renamed = annotationManager?.renameSelected(name) ?? null
+    if (!renamed) {
+        mapToolState.annotationResult = '重命名失败：未找到选中标注'
+        return
+    }
+    mapToolState.annotationResult = `已重命名为 ${renamed.name}`
 }
 
 /** 添加基于分层信息的钻孔三维实体。 */
@@ -387,11 +459,45 @@ function handleMapClick(event: { position: Cartesian2 }) {
     }
 
     const entity = pickEntity(event.position)
+
+    if (mapToolState.annotating) {
+        const cartesian = interactionManager?.pickCartesian(event.position) ?? null
+        if (!cartesian) {
+            mapToolState.annotationResult = '当前视角下无法拾取地表位置'
+            return
+        }
+
+        const defaultName = annotationManager?.createDefaultName() ?? '标注'
+        const input = window.prompt('请输入标注名称', defaultName)
+        if (input === null) {
+            mapToolState.annotationResult = '已取消添加标注'
+            return
+        }
+        const name = input.trim() || defaultName
+        const result = annotationManager?.addAt(cartesian, name)
+        if (!result) {
+            mapToolState.annotationResult = '添加标注失败'
+            return
+        }
+        mapToolState.annotationResult = `已添加 ${result.annotation.name} (${result.longitude.toFixed(6)}, ${result.latitude.toFixed(6)})`
+        return
+    }
+
     if (!entity) {
+        annotationManager?.clearSelection()
         return
     }
     const domainType = readEntityProperty(entity, 'domainType')
     const targetId = readEntityProperty(entity, 'targetId')
+    if (domainType === 'annotation') {
+        const selected = annotationManager?.selectByEntity(entity) ?? null
+        mapToolState.annotationResult = selected
+            ? `已选中 ${selected.name}，可使用“重命名标注/删除标注”`
+            : '标注选择失败'
+        return
+    }
+
+    annotationManager?.clearSelection()
     if (domainType === 'borehole') {
         store.selectBorehole(targetId)
     }
@@ -521,6 +627,11 @@ function toggleDistanceMeasure() {
     }
 
     mapToolState.measuring = true
+    mapToolState.annotating = false
+    annotationManager?.clearSelection()
+    if (mapToolState.annotationResult.startsWith('已选中')) {
+        mapToolState.annotationResult = ''
+    }
     mapToolState.measureResult = '测距中：左键选两点，右键取消'
     measureTool.startDistance((result) => {
         mapToolState.measuring = false
@@ -620,6 +731,7 @@ function destroyScene() {
     }
     mineTilesetMap.clear()
     mineTilesetEntries = []
+    annotationManager?.clearAll()
     measureTool?.destroy()
     interactionManager?.destroy()
     viewerManager?.destroy()
@@ -627,6 +739,7 @@ function destroyScene() {
     viewerManager = null
     cameraManager = null
     entityManager = null
+    annotationManager = null
     interactionManager = null
     layerManager = null
     imageryLayerLoader = null
@@ -658,6 +771,12 @@ defineExpose({ flyToBorehole, flyToBoundary, flyToLayer })
                 {{ mapToolState.measuring ? '结束测距' : '测距' }}
             </button>
             <button type="button" @click="clearMeasureResult">清除测量</button>
+            <button type="button" :class="{ 'is-active': mapToolState.annotating }" @click="toggleAnnotationMode">
+                {{ mapToolState.annotating ? '结束标注' : '点击标注' }}
+            </button>
+            <button type="button" @click="renameSelectedAnnotation">重命名标注</button>
+            <button type="button" @click="deleteSelectedAnnotation">删除标注</button>
+            <button type="button" @click="clearAnnotations">清空标注</button>
             <button type="button" :disabled="mapToolState.tilesetLoading" @click="loadMineTilesetAndLocate">
                 {{ mapToolState.tilesetLoading ? '模型加载中...' : (mapToolState.tilesetLoaded ? '定位全部模型' : '加载全部模型') }}
             </button>
