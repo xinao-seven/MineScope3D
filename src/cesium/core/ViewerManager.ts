@@ -1,16 +1,21 @@
 import {
+    CesiumTerrainProvider,
     Color,
+    EllipsoidTerrainProvider,
+    Ion,
     OpenStreetMapImageryProvider,
     UrlTemplateImageryProvider,
     Viewer,
 } from 'cesium'
 import {
     BASEMAP_CONFIG,
+    CESIUM_ION_ACCESS_TOKEN,
     DEFAULT_FOG_ENABLED,
     DEFAULT_GLOBE_DEPTH_TEST,
     DEFAULT_GLOBE_LIGHTING,
     DEFAULT_SCENE_CONFIG,
     DEFAULT_VIEWER_OPTIONS,
+    TERRAIN_SERVICE_URL,
     type BasemapKey,
     type ViewerConstructorOptions,
 } from '../constants'
@@ -25,6 +30,7 @@ export class ViewerManager {
             ...options,
         })
         this.applyDefaultSceneConfig()
+        void this.loadTerrainService()
     }
 
     /** 应用项目统一场景参数。 */
@@ -98,5 +104,27 @@ export class ViewerManager {
             credit: config.credit,
             subdomains: config.subdomains,
         })
+    }
+
+    /** 加载地形服务，优先使用配置 URL，其次尝试 Cesium World Terrain。 */
+    private async loadTerrainService(): Promise<void> {
+        if (CESIUM_ION_ACCESS_TOKEN) {
+            Ion.defaultAccessToken = CESIUM_ION_ACCESS_TOKEN
+        }
+
+        try {
+            if (TERRAIN_SERVICE_URL) {
+                this.viewer.terrainProvider = await CesiumTerrainProvider.fromUrl(TERRAIN_SERVICE_URL)
+                return
+            }
+
+            this.viewer.terrainProvider = await CesiumTerrainProvider.fromIonAssetId(1)
+        } catch (error) {
+            this.viewer.terrainProvider = new EllipsoidTerrainProvider()
+            console.warn('[MineScope3D] 地形服务加载失败，已回退为椭球地形', {
+                terrainUrl: TERRAIN_SERVICE_URL,
+                error,
+            })
+        }
     }
 }

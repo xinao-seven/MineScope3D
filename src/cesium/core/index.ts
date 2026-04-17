@@ -1,3 +1,5 @@
 export * from './ViewerManager'
 export * from './CameraManager'
 export * from './coordinateTransform'
+export * from './entityProperty'
+export * from './dashboardScene'

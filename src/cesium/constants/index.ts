@@ -48,6 +48,9 @@ export const DEFAULT_LABEL_FONT = '12px Microsoft YaHei'
 export const DEFAULT_MEASURE_LABEL_FONT = '14px Microsoft YaHei'
 export const DEFAULT_PICK_DISTANCE = Number.POSITIVE_INFINITY
 
+export const TERRAIN_SERVICE_URL = String(import.meta.env.VITE_CESIUM_TERRAIN_URL ?? '').trim()
+export const CESIUM_ION_ACCESS_TOKEN = String(import.meta.env.VITE_CESIUM_ION_ACCESS_TOKEN ?? '').trim()
+
 export interface BasemapConfigItem {
     url: string
     credit?: string

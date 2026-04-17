@@ -41,6 +41,8 @@ MineScope3D/
 - `BACKEND_PORT`: Flask 监听端口，默认 `8000`
 - `BACKEND_DEBUG`: Flask 调试开关，默认 `true`
 - `CORS_ALLOWED_ORIGINS`: 前端允许来源
+- `VITE_CESIUM_TERRAIN_URL`: 前端地形服务 URL（可选，配置后优先使用）
+- `VITE_CESIUM_ION_ACCESS_TOKEN`: Cesium ion 访问令牌（可选，未配置 `VITE_CESIUM_TERRAIN_URL` 时用于 World Terrain）
 
 ## 安装依赖
 

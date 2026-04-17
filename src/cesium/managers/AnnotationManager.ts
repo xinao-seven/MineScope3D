@@ -3,11 +3,11 @@ import {
     Cartographic,
     Color,
     Entity,
-    JulianDate,
     Math as CesiumMath,
     PropertyBag,
     type Viewer,
 } from 'cesium'
+import { readEntityProperty } from '../core/entityProperty'
 import { EntityManager } from './EntityManager'
 
 export interface AnnotationRecord {
@@ -73,7 +73,7 @@ export class AnnotationManager {
 
     /** 判断实体是否为标注实体。 */
     isAnnotationEntity(entity: Entity): boolean {
-        return this.readProperty(entity, 'domainType') === 'annotation'
+        return readEntityProperty(entity, 'domainType') === 'annotation'
     }
 
     /** 根据点击实体更新当前选中标注。 */
@@ -82,7 +82,7 @@ export class AnnotationManager {
             this.selectedId = null
             return null
         }
-        const id = this.readProperty(entity, 'targetId')
+        const id = readEntityProperty(entity, 'targetId')
         return this.selectById(id)
     }
 
@@ -177,10 +177,5 @@ export class AnnotationManager {
             tag: 'annotation',
         })
         this.entities.set(annotation.id, entity)
-    }
-
-    private readProperty(entity: Entity, key: string): string {
-        const values = entity.properties?.getValue(JulianDate.now()) as Record<string, unknown> | undefined
-        return String(values?.[key] ?? '')
     }
 }

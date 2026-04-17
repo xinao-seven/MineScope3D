@@ -6,15 +6,20 @@ import {
     Cesium3DTileset,
     Entity,
     ImageryLayer,
-    JulianDate,
-    PropertyBag,
-    Rectangle,
     Viewer,
     defined,
 } from 'cesium'
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { CameraManager } from '../../cesium/core/CameraManager'
-import { degreesArrayToCartesianArray } from '../../cesium/core/coordinateTransform'
+import {
+    addBoreholeLayerEntities,
+    addBoreholePointEntities,
+    addBoundaryEntities,
+    buildBoreholeRectangle,
+    buildBoundaryRectangle,
+    buildRasterRectangle,
+} from '../../cesium/core/dashboardScene'
+import { readEntityProperty } from '../../cesium/core/entityProperty'
 import { ViewerManager } from '../../cesium/core/ViewerManager'
 import type { BasemapKey } from '../../cesium/constants'
 import { TilesetLoader } from '../../cesium/loaders/TilesetLoader'
@@ -26,7 +31,7 @@ import { ImageryLayerLoader } from '../../cesium/loaders/ImageryLayerLoader'
 import { MeasureTool } from '../../cesium/tools/MeasureTool'
 import { fetchTilesets, type TilesetEntry } from '../../api/tilesets'
 import { useDashboardStore } from '../../store/dashboard'
-import type { Borehole, BoundaryRegion, LayerKey, RasterLayer } from '../../types/dashboard'
+import type { LayerKey, RasterLayer } from '../../types/dashboard'
 
 const store = useDashboardStore()
 const mapContainer = ref<HTMLDivElement | null>(null)
@@ -99,19 +104,9 @@ function bindMapInteractions() {
     interactionManager.onMouseMove(handleMouseMove)
 }
 
-/** 读取图层监听签名。 */
-function readLayerSignature() {
-    return store.layerSignature
-}
-
-/** 读取业务数据监听签名。 */
-function readDataSignature() {
-    return `${store.boreholes.length}:${store.boundaries.length}:${store.rasters.length}`
-}
-
 /** 重新绘制全部业务图层。 */
 function reloadSceneData() {
-    if (!viewer || !viewerManager) {
+    if (!viewer || !viewerManager || !entityManager) {
         return
     }
 
@@ -120,9 +115,10 @@ function reloadSceneData() {
     boreholeLayerEntities.clear()
     boundaryEntities.clear()
     removeRasterLayer()
-    addBoreholes(store.boreholes)
-    addBoreholeLayerModels(store.boreholes)
-    addBoundaries(store.boundaries)
+
+    addBoreholePointEntities(entityManager, store.boreholes, boreholeEntities)
+    addBoreholeLayerEntities(entityManager, store.boreholes, boreholeLayerEntities)
+    addBoundaryEntities(entityManager, store.boundaries, boundaryEntities)
     addRasterLayer(store.activeRaster)
     syncLayerVisibility()
     annotationManager?.restoreEntities()
@@ -195,57 +191,6 @@ function renameSelectedAnnotation() {
     mapToolState.annotationResult = `已重命名为 ${renamed.name}`
 }
 
-/** 添加基于分层信息的钻孔三维实体。 */
-function addBoreholeLayerModels(boreholes: Borehole[]) {
-    if (!entityManager) {
-        return
-    }
-
-    const verticalExaggeration = 4.5
-    const minimumVisualLength = 10
-    const visualRadius = 5.2
-
-    for (const borehole of boreholes) {
-        if (borehole.longitude === 0 && borehole.latitude === 0 || borehole.layers.length === 0) {
-            continue
-        }
-
-        const layerEntities: Entity[] = []
-        const layers = [...borehole.layers].sort((left, right) => left.sort_order - right.sort_order)
-        for (const layer of layers) {
-            const thickness = Math.max(layer.thickness, 0)
-            if (thickness <= 0) {
-                continue
-            }
-
-            const centerHeight = borehole.elevation - (layer.top_depth + thickness / 2) * verticalExaggeration
-            const layerColor = Color.fromCssColorString(layer.color || '#23d18b')
-            const entity = entityManager.addCylinder({
-                id: `borehole-layer-${borehole.id}-${layer.sort_order}`,
-                name: `${borehole.name}-${layer.layer_name}`,
-                position: { lon: borehole.longitude, lat: borehole.latitude, height: centerHeight },
-                length: Math.max(thickness * verticalExaggeration, minimumVisualLength),
-                topRadius: visualRadius,
-                bottomRadius: visualRadius,
-                color: layerColor.withAlpha(0.8),
-                outlineColor: layerColor.withAlpha(0.95),
-                tag: 'borehole-layer-model',
-            })
-            entity.properties = new PropertyBag({
-                domainType: 'borehole-layer-model',
-                targetId: borehole.id,
-                layerName: layer.layer_name,
-                tag: 'borehole-layer-model',
-            })
-            layerEntities.push(entity)
-        }
-
-        if (layerEntities.length > 0) {
-            boreholeLayerEntities.set(borehole.id, layerEntities)
-        }
-    }
-}
-
 /** 只在数据首次加载完成后自动飞向矿区。 */
 function flyToMineOnce() {
     if (hasAutoFlownToMine || store.boundaries.length === 0) {
@@ -253,37 +198,6 @@ function flyToMineOnce() {
     }
     hasAutoFlownToMine = true
     window.setTimeout(() => flyToLayer('mineBoundary'), 240)
-}
-
-/** 添加钻孔点实体。 */
-function addBoreholes(boreholes: Borehole[]) {
-    if (!entityManager) {
-        return
-    }
-
-    for (const borehole of boreholes) {
-        if (borehole.longitude === 0 && borehole.latitude === 0) {
-            continue
-        }
-        const entity = entityManager.addPoint({
-            id: `borehole-${borehole.id}`,
-            name: borehole.name,
-            position: { lon: borehole.longitude, lat: borehole.latitude, height: borehole.elevation },
-            pixelSize: 13,
-            color: Color.fromCssColorString('#f2c94c'),
-            outlineColor: Color.fromCssColorString('#04110e'),
-            outlineWidth: 3,
-            labelText: borehole.borehole_code,
-            tag: 'borehole',
-        })
-        entity.properties = new PropertyBag({
-            domainType: 'borehole',
-            targetId: borehole.id,
-            tag: 'borehole',
-        })
-
-        boreholeEntities.set(borehole.id, entity)
-    }
 }
 
 /** 切换快捷底图，同时保留 Cesium 原生底图选择器。 */
@@ -295,47 +209,9 @@ function switchBasemap(key: BasemapKey) {
     activeBasemapKey.value = key
 }
 
-/** 添加矿区与工作面边界实体。 */
-function addBoundaries(boundaries: BoundaryRegion[]) {
-    if (!entityManager) {
-        return
-    }
-
-    for (const boundary of boundaries) {
-        const positions = degreesArrayToCartesianArray(
-            boundary.coordinates.map((item) => ({ lon: item[0], lat: item[1], height: 0 })),
-        )
-        const color = boundary.type === 'mine' ? Color.fromCssColorString('#23d18b') : Color.fromCssColorString('#56ccf2')
-        const polygon = entityManager.addPolygon({
-            id: `boundary-${boundary.id}`,
-            name: boundary.name,
-            positions,
-            color: color.withAlpha(boundary.type === 'mine' ? 0.12 : 0.18),
-            outlineColor: color.withAlpha(0.95),
-            outlineWidth: boundary.type === 'mine' ? 2 : 1,
-            tag: 'boundary',
-        })
-        const polyline = entityManager.addPolyline({
-            id: `boundary-outline-${boundary.id}`,
-            name: `${boundary.name}-outline`,
-            positions,
-            width: boundary.type === 'mine' ? 4 : 3,
-            color: color.withAlpha(0.95),
-            clampToGround: true,
-            tag: 'boundary',
-        })
-
-        const boundaryProperties = new PropertyBag({
-            domainType: 'boundary',
-            targetId: boundary.id,
-            boundaryType: boundary.type,
-            tag: 'boundary',
-        })
-        polygon.properties = boundaryProperties
-        polyline.properties = boundaryProperties
-
-        boundaryEntities.set(boundary.id, [polygon, polyline])
-    }
+function applyRasterLayerState(targetLayer: ImageryLayer, fallbackOpacity: number) {
+    targetLayer.alpha = store.getLayerState('raster')?.opacity ?? fallbackOpacity
+    targetLayer.show = store.getLayerState('raster')?.visible ?? true
 }
 
 /** 添加 TIFF 元信息对应的影像叠加层。 */
@@ -357,14 +233,12 @@ async function addRasterLayer(raster: RasterLayer | null) {
         rasterLayer = previewUrl
             ? await imageryLayerLoader.addSingleTile(previewUrl, bounds)
             : await imageryLayerLoader.addGeoTiffSingleTile(raster.url, bounds)
-        rasterLayer.alpha = store.getLayerState('raster')?.opacity ?? raster.opacity
-        rasterLayer.show = store.getLayerState('raster')?.visible ?? true
+        applyRasterLayerState(rasterLayer, raster.opacity)
     } catch (error) {
         if (previewUrl) {
             try {
                 rasterLayer = await imageryLayerLoader.addGeoTiffSingleTile(raster.url, bounds)
-                rasterLayer.alpha = store.getLayerState('raster')?.opacity ?? raster.opacity
-                rasterLayer.show = store.getLayerState('raster')?.visible ?? true
+                applyRasterLayerState(rasterLayer, raster.opacity)
                 return
             } catch (fallbackError) {
                 console.error('[MineScope3D] 栅格预览与 TIFF 回退加载均失败', {
@@ -532,12 +406,6 @@ function pickEntity(position: Cartesian2): Entity | null {
     return null
 }
 
-/** 读取实体上的业务属性。 */
-function readEntityProperty(entity: Entity, key: string): string {
-    const values = entity.properties?.getValue(JulianDate.now()) as Record<string, unknown> | undefined
-    return String(values?.[key] ?? '')
-}
-
 /** 飞行定位到钻孔点。 */
 function flyToBorehole(id: string) {
     const borehole = store.boreholes.find((item) => item.id === id)
@@ -571,7 +439,7 @@ function flyToLayer(key: LayerKey) {
     }
 
     if (key === 'boreholes') {
-        const destination = buildBoreholeRectangle()
+        const destination = buildBoreholeRectangle(store.boreholes)
         if (destination) {
             cameraManager.flyToRectangle(destination, 1.1)
         }
@@ -590,29 +458,6 @@ function flyToLayer(key: LayerKey) {
         store.selectBoundary(targetBoundary.id)
         cameraManager.flyToRectangle(buildBoundaryRectangle(targetBoundary), 1.1)
     }
-}
-
-/** 计算钻孔点整体矩形范围。 */
-function buildBoreholeRectangle(): Rectangle | null {
-    const spatialBoreholes = store.boreholes.filter((item) => item.longitude !== 0 || item.latitude !== 0)
-    if (spatialBoreholes.length === 0) {
-        return null
-    }
-    const longitudes = spatialBoreholes.map((item) => item.longitude)
-    const latitudes = spatialBoreholes.map((item) => item.latitude)
-    return Rectangle.fromDegrees(Math.min(...longitudes) - 0.02, Math.min(...latitudes) - 0.02, Math.max(...longitudes) + 0.02, Math.max(...latitudes) + 0.02)
-}
-
-/** 计算边界对象矩形范围。 */
-function buildBoundaryRectangle(boundary: BoundaryRegion): Rectangle {
-    const longitudes = boundary.coordinates.map((item) => item[0])
-    const latitudes = boundary.coordinates.map((item) => item[1])
-    return Rectangle.fromDegrees(Math.min(...longitudes) - 0.01, Math.min(...latitudes) - 0.01, Math.max(...longitudes) + 0.01, Math.max(...latitudes) + 0.01)
-}
-
-/** 计算专题图图层矩形范围。 */
-function buildRasterRectangle(raster: RasterLayer): Rectangle {
-    return Rectangle.fromDegrees(raster.bounds.west, raster.bounds.south, raster.bounds.east, raster.bounds.north)
 }
 
 /** 切换测距模式。 */
@@ -747,8 +592,8 @@ function destroyScene() {
     measureTool = null
 }
 
-watch(readLayerSignature, syncLayerVisibility)
-watch(readDataSignature, reloadSceneData)
+watch(() => store.layerSignature, syncLayerVisibility)
+watch(() => `${store.boreholes.length}:${store.boundaries.length}:${store.rasters.length}`, reloadSceneData)
 watch(() => mapToolState.showLayerModel, syncBoreholeVisibility)
 onMounted(mountScene)
 onBeforeUnmount(destroyScene)
