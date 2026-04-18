@@ -17,6 +17,40 @@ import type {
     RasterLayer,
 } from '../types/dashboard'
 
+export interface BoundaryGeoJsonFeatureCollection {
+    type: 'FeatureCollection'
+    features: Array<{
+        type: 'Feature'
+        geometry: {
+            type: string
+            coordinates: unknown
+        } | null
+        properties: Record<string, unknown>
+    }>
+}
+
+function buildBoundaryGeoJsonFallback(): BoundaryGeoJsonFeatureCollection {
+    return {
+        type: 'FeatureCollection',
+        features: mockBoundaries.map((boundary) => ({
+            type: 'Feature',
+            geometry: {
+                type: 'Polygon',
+                coordinates: [boundary.coordinates],
+            },
+            properties: {
+                id: boundary.id,
+                name: boundary.name,
+                type: boundary.type,
+                area: boundary.area,
+                perimeter: boundary.perimeter,
+                borehole_count: boundary.borehole_count,
+                properties: boundary.properties,
+            },
+        })),
+    }
+}
+
 /** 调用接口失败时返回本地演示数据。 */
 async function requestWithFallback<T>(request: Promise<{ data: T }>, fallback: T): Promise<T> {
     try {
@@ -38,6 +72,11 @@ export function fetchBoreholes(): Promise<Borehole[]> {
 /** 获取边界对象列表。 */
 export function fetchBoundaries(): Promise<BoundaryRegion[]> {
     return requestWithFallback(apiClient.get<BoundaryRegion[]>('/boundaries/'), mockBoundaries)
+}
+
+/** 获取边界 GeoJSON（用于 Cesium 直接叠加）。 */
+export function fetchBoundaryGeoJson(): Promise<BoundaryGeoJsonFeatureCollection> {
+    return requestWithFallback(apiClient.get<BoundaryGeoJsonFeatureCollection>('/boundaries/geojson/'), buildBoundaryGeoJsonFallback())
 }
 
 /** 获取 TIFF 专题图层元信息。 */

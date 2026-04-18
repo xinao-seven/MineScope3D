@@ -146,6 +146,62 @@ export function addBoundaryEntities(
     }
 }
 
+/** 构建边界 ID 到边界对象的快速索引。 */
+export function buildBoundaryLookup(boundaries: BoundaryRegion[]): Map<string, BoundaryRegion> {
+    const lookup = new Map<string, BoundaryRegion>()
+    for (const boundary of boundaries) {
+        lookup.set(boundary.id, boundary)
+    }
+    return lookup
+}
+
+/**
+ * 对缺失 polygon 的边界追加面实体（仅补面，不补线）。
+ * 适用于 GeoJSON 中仅返回线要素，但业务需要“面+线”同时显示的场景。
+ */
+export function addBoundaryPolygonFallbackEntities(
+    entityManager: EntityManager,
+    boundaries: BoundaryRegion[],
+    targetMap: Map<string, Entity[]>,
+    polygonBoundaryIds: Set<string>,
+): void {
+    for (const boundary of boundaries) {
+        if (polygonBoundaryIds.has(boundary.id) || boundary.coordinates.length < 3) {
+            continue
+        }
+
+        const positions = degreesArrayToCartesianArray(
+            boundary.coordinates.map((item) => ({ lon: item[0], lat: item[1], height: 0 })),
+        )
+        const color = pickBoundaryColor(boundary.type)
+        const polygon = entityManager.addPolygon({
+            id: `boundary-${boundary.id}`,
+            name: boundary.name,
+            positions,
+            color: color.withAlpha(boundary.type === 'mine' ? 0.12 : 0.18),
+            outlineColor: color.withAlpha(0.95),
+            outlineWidth: boundary.type === 'mine' ? 2 : 1,
+            tag: 'boundary',
+        })
+
+        polygon.properties = new PropertyBag({
+            id: boundary.id,
+            type: boundary.type,
+            domainType: 'boundary',
+            targetId: boundary.id,
+            boundaryType: boundary.type,
+            tag: 'boundary',
+        })
+
+        const grouped = targetMap.get(boundary.id)
+        if (grouped) {
+            grouped.push(polygon)
+        } else {
+            targetMap.set(boundary.id, [polygon])
+        }
+    }
+}
+
 /** 根据全部有效空间钻孔计算矩形范围。 */
 export function buildBoreholeRectangle(boreholes: Borehole[]): Rectangle | null {
     const spatialBoreholes = boreholes.filter(hasSpatialPosition)

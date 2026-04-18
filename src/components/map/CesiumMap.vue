@@ -6,6 +6,7 @@ import {
     Cesium3DTileset,
     Entity,
     ImageryLayer,
+    PropertyBag,
     Viewer,
     defined,
 } from 'cesium'
@@ -14,7 +15,8 @@ import { CameraManager } from '../../cesium/core/CameraManager'
 import {
     addBoreholeLayerEntities,
     addBoreholePointEntities,
-    addBoundaryEntities,
+    addBoundaryPolygonFallbackEntities,
+    buildBoundaryLookup,
     buildBoreholeRectangle,
     buildBoundaryRectangle,
     buildRasterRectangle,
@@ -22,13 +24,14 @@ import {
 import { readEntityProperty } from '../../cesium/core/entityProperty'
 import { ViewerManager } from '../../cesium/core/ViewerManager'
 import type { BasemapKey } from '../../cesium/constants'
-import { TilesetLoader } from '../../cesium/loaders/TilesetLoader'
+import { GeoJsonLayerLoader, TilesetLoader } from '../../cesium/loaders'
 import { EntityManager } from '../../cesium/managers/EntityManager'
 import { AnnotationManager } from '../../cesium/managers/AnnotationManager'
 import { InteractionManager } from '../../cesium/managers/InteractionManager'
 import { LayerManager } from '../../cesium/managers/LayerManager'
 import { ImageryLayerLoader } from '../../cesium/loaders/ImageryLayerLoader'
 import { MeasureTool } from '../../cesium/tools/MeasureTool'
+import { fetchBoundaryGeoJson } from '../../api/dashboard'
 import { fetchTilesets, type TilesetEntry } from '../../api/tilesets'
 import { useDashboardStore } from '../../store/dashboard'
 import type { LayerKey, RasterLayer } from '../../types/dashboard'
@@ -63,6 +66,7 @@ let annotationManager: AnnotationManager | null = null
 let interactionManager: InteractionManager | null = null
 let layerManager: LayerManager | null = null
 let imageryLayerLoader: ImageryLayerLoader | null = null
+let geoJsonLayerLoader: GeoJsonLayerLoader | null = null
 let tilesetLoader: TilesetLoader | null = null
 let measureTool: MeasureTool | null = null
 let rasterLayer: ImageryLayer | null = null
@@ -87,6 +91,7 @@ function mountScene() {
     interactionManager = new InteractionManager(viewer)
     layerManager = new LayerManager(viewer)
     imageryLayerLoader = new ImageryLayerLoader(viewer)
+    geoJsonLayerLoader = new GeoJsonLayerLoader(viewer)
     tilesetLoader = new TilesetLoader(viewer)
     measureTool = new MeasureTool(viewer)
 
@@ -118,11 +123,81 @@ function reloadSceneData() {
 
     addBoreholePointEntities(entityManager, store.boreholes, boreholeEntities)
     addBoreholeLayerEntities(entityManager, store.boreholes, boreholeLayerEntities)
-    addBoundaryEntities(entityManager, store.boundaries, boundaryEntities)
+    void loadBoundaryGeoJsonLayer()
     addRasterLayer(store.activeRaster)
     syncLayerVisibility()
     annotationManager?.restoreEntities()
     flyToMineOnce()
+}
+
+/** 通过 GeoJSON 数据源直接叠加边界并写入选中映射。 */
+async function loadBoundaryGeoJsonLayer() {
+    if (!geoJsonLayerLoader || !entityManager) {
+        return
+    }
+
+    try {
+        const geojson = await fetchBoundaryGeoJson()
+        const dataSource = await geoJsonLayerLoader.load(geojson, 'boundaries-geojson')
+        boundaryEntities.clear()
+        const boundaryLookup = buildBoundaryLookup(store.boundaries)
+        const polygonBoundaryIds = new Set<string>()
+
+        for (const entity of dataSource.entities.values) {
+            const boundaryId = readEntityProperty(entity, 'id')
+            const boundaryType = readEntityProperty(entity, 'type')
+            if (!boundaryId) {
+                continue
+            }
+
+            const boundary = boundaryLookup.get(boundaryId)
+            const resolvedType = boundaryType || boundary?.type || 'workface'
+            const resolvedName = boundary?.name || readEntityProperty(entity, 'name') || entity.name || `边界-${boundaryId}`
+
+            const color = resolvedType === 'mine'
+                ? Color.fromCssColorString('#23d18b')
+                : Color.fromCssColorString('#56ccf2')
+
+            if (entity.polygon) {
+                polygonBoundaryIds.add(boundaryId)
+                const polygon = entity.polygon as any
+                polygon.material = color.withAlpha(resolvedType === 'mine' ? 0.12 : 0.18)
+                polygon.outline = true
+                polygon.outlineColor = color.withAlpha(0.95)
+            }
+            if (entity.polyline) {
+                const polyline = entity.polyline as any
+                polyline.material = color.withAlpha(0.95)
+                polyline.width = resolvedType === 'mine' ? 4 : 3
+                polyline.clampToGround = true
+            }
+
+            entity.name = String(resolvedName)
+
+            entity.properties = new PropertyBag({
+                id: boundaryId,
+                type: resolvedType,
+                domainType: 'boundary',
+                targetId: boundaryId,
+                boundaryType: resolvedType,
+                tag: 'boundary',
+            })
+
+            const targetList = boundaryEntities.get(boundaryId)
+            if (targetList) {
+                targetList.push(entity)
+            } else {
+                boundaryEntities.set(boundaryId, [entity])
+            }
+        }
+
+        // GeoJSON 只含线时，按元数据坐标补面，保证“面+线”同时可交互。
+        addBoundaryPolygonFallbackEntities(entityManager, store.boundaries, boundaryEntities, polygonBoundaryIds)
+
+        syncBoundaryVisibility()
+    } catch (error) {
+        console.error('[MineScope3D] 边界 GeoJSON 加载失败', { error })
+    }
 }
 
 /** 切换点击标注模式。 */
@@ -301,11 +376,11 @@ function syncBoundaryVisibility() {
             } else {
                 entity.show = layer?.visible ?? true
             }
-            if (entity.polygon && entity.id === `boundary-${boundary.id}`) {
+            if (entity.polygon) {
                 ;(entity.polygon as any).material = color.withAlpha((layer?.opacity ?? 0.72) * 0.24)
                 ;(entity.polygon as any).outlineColor = color.withAlpha(layer?.opacity ?? 0.72)
             }
-            if (entity.polyline && entity.id === `boundary-outline-${boundary.id}`) {
+            if (entity.polyline) {
                 ;(entity.polyline as any).material = color.withAlpha(layer?.opacity ?? 0.72)
             }
         }
@@ -588,6 +663,7 @@ function destroyScene() {
     interactionManager = null
     layerManager = null
     imageryLayerLoader = null
+    geoJsonLayerLoader = null
     tilesetLoader = null
     measureTool = null
 }

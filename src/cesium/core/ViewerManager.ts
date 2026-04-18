@@ -24,13 +24,16 @@ export class ViewerManager {
     readonly viewer: Viewer
 
     /** 创建 Viewer 并应用项目默认场景配置。 */
-    constructor(container: string | HTMLElement, options: Partial<ViewerConstructorOptions> = {}) {
+    constructor(container: string | HTMLElement, loadterrain: boolean=false, options: Partial<ViewerConstructorOptions> = {}) {
         this.viewer = new Viewer(container, {
             ...DEFAULT_VIEWER_OPTIONS,
             ...options,
         })
         this.applyDefaultSceneConfig()
-        void this.loadTerrainService()
+
+        if (loadterrain) {
+            void this.loadTerrainService()
+        }
     }
 
     /** 应用项目统一场景参数。 */
